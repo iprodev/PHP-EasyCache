@@ -3,7 +3,7 @@
 namespace iProDev\Util;
 
 /*
- * EasyCache v1.0.0
+ * EasyCache v1.1.0
  *
  * By Hemn Chawroka
  * http://iprodev.com
@@ -51,9 +51,12 @@ class EasyCache {
 	 */
 	public function set($cache_key, $data)
 	{
+		// Serialize
+		$data = $this->maybe_serialize($data);
+
 		// Compress
 		if ($this->compress_level > 0) {
-			$data = compress($data);
+			$data = $this->compress($data);
 		}
 
 		// Put the cache data to the file
@@ -75,8 +78,11 @@ class EasyCache {
 
 			// Uncompress
 			if ($this->compress_level > 0) {
-				$data = uncompress($data);
+				$data = $this->uncompress($data);
 			}
+
+			// Unserialize
+			$data = $this->maybe_unserialize($data);
 
 			return $data;
 		}
@@ -109,6 +115,8 @@ class EasyCache {
 	 */
 	public function get_contents($url)
 	{
+		$content = null;
+
 		if(function_exists("curl_init")){
 			$ch = curl_init();
 			curl_setopt($ch, CURLOPT_URL, $url);
@@ -116,10 +124,15 @@ class EasyCache {
 			curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
 			$content = curl_exec($ch);
 			curl_close($ch);
-			return $content;
 		} else {
-			return file_get_contents($url);
+			$content = file_get_contents($url);
 		}
+
+		// Check JSON
+		if ($content && $this->is_json($content))
+			$content = json_decode($content, true);
+
+		return $content;
 	}
 
 	/**
@@ -173,5 +186,104 @@ class EasyCache {
 	 */
 	private function within($number, $min, $max) {
 		return $number < $min ? $min : $number > $max ? $max : $number;
+	}
+
+	/**
+	 * Unserialize value only if it was serialized.
+	 *
+	 * @param  {String} $original  Maybe unserialized original, if is needed.
+	 * @return {Mixed}             Unserialized data can be any type.
+	 */
+	private function maybe_unserialize( $original ) {
+		if ( $this->is_serialized( $original ) ) // don't attempt to unserialize data that wasn't serialized going in
+			return @unserialize( $original );
+		return $original;
+	}
+
+	/**
+	 * Serialize data, if needed.
+	 *
+	 * @param  {Mixed} $data  Data that might be serialized.
+	 * @return {Mixed}        A scalar data
+	 */
+	private function maybe_serialize( $data ) {
+		if ( is_array( $data ) || is_object( $data ) )
+			return serialize( $data );
+
+		// Double serialization is required for backward compatibility.
+		if ( $this->is_serialized( $data, false ) )
+			return serialize( $data );
+
+		return $data;
+	}
+
+	/**
+	 * Check value to find if it was serialized.
+	 *
+	 * If $data is not an string, then returned value will always be false.
+	 * Serialized data is always a string.
+	 *
+	 * @param  {Mixed}   $data    Value to check to see if was serialized.
+	 * @param  {Boolean} $strict  Optional. Whether to be strict about the end of the string. Defaults true.
+	 * @return {Boolean}          False if not serialized and true if it was.
+	 */
+	private function is_serialized( $data, $strict = true ) {
+		// if it isn't a string, it isn't serialized
+		if ( ! is_string( $data ) )
+			return false;
+		$data = trim( $data );
+	 	if ( 'N;' == $data )
+			return true;
+		$length = strlen( $data );
+		if ( $length < 4 )
+			return false;
+		if ( ':' !== $data[1] )
+			return false;
+		if ( $strict ) {
+			$lastc = $data[ $length - 1 ];
+			if ( ';' !== $lastc && '}' !== $lastc )
+				return false;
+		} else {
+			$semicolon = strpos( $data, ';' );
+			$brace     = strpos( $data, '}' );
+			// Either ; or } must exist.
+			if ( false === $semicolon && false === $brace )
+				return false;
+			// But neither must be in the first X characters.
+			if ( false !== $semicolon && $semicolon < 3 )
+				return false;
+			if ( false !== $brace && $brace < 4 )
+				return false;
+		}
+		$token = $data[0];
+		switch ( $token ) {
+			case 's' :
+				if ( $strict ) {
+					if ( '"' !== $data[ $length - 2 ] )
+						return false;
+				} elseif ( false === strpos( $data, '"' ) ) {
+					return false;
+				}
+				// or else fall through
+			case 'a' :
+			case 'O' :
+				return (bool) preg_match( "/^{$token}:[0-9]+:/s", $data );
+			case 'b' :
+			case 'i' :
+			case 'd' :
+				$end = $strict ? '$' : '';
+				return (bool) preg_match( "/^{$token}:[0-9.E-]+;$end/", $data );
+		}
+		return false;
+	}
+
+	/**
+	 *	Determines whether or not a string contains valid json encoding.
+	 *
+	 *	@param	{String}   $string  string to test
+	 *	@return	{Boolean}           true if valid, false if not
+	 */
+	private function is_json($string) {
+		return $string && @is_array(json_decode($string));
 	}
 }

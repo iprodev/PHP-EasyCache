@@ -28,7 +28,7 @@ A very basic usage example:
 ```php
 $cache = new iProDev\Util\EasyCache();
 $latest_tweet = $cache->get_data('tweet', 'http://search.twitter.com/search.atom?q=from:chawroka&rpp=1');
-echo $latest_tweet;
+var_dump($latest_tweet);
 ```
 
 A more advanced example:
@@ -38,15 +38,14 @@ $cache = new iProDev\Util\EasyCache();
 $cache->cache_path = 'cache/';
 $cache->cache_time = 3600;
 
-if($data = $cache->get('identity_keyword')){
-	$data = json_decode($data);
-} else {
+$data = $cache->get('identity_keyword');
+
+if(!$data) {
 	$data = $cache->get_contents('http://some.api.com/file.json');
 	$cache->set('identity_keyword', $data);
-	$data = json_decode($data);
 }
 
-print_r($data);
+var_dump($data);
 ```
 
 An example with compressing data:
@@ -55,9 +54,9 @@ An example with compressing data:
 $cache = new iProDev\Util\EasyCache();
 $cache->compress_level = 9;
 
-$data = json_decode($cache->get_data('identity_keyword', 'http://some.api.com/file.json'));
+$data = $cache->get_data('identity_keyword', 'http://some.api.com/file.json');
 
-print_r($data);
+var_dump($data);
 ```
 
 ## Credits
