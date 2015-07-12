@@ -170,7 +170,7 @@ class EasyCache {
 	 */
 	private function uncompress($contents) {
 		if (function_exists('gzinflate')) {
-			$contents = gzinflate($contents, $this->within($this->compress_level, 1, 9));
+			$contents = gzinflate($contents);
 		}
 		return $contents;
 	}
