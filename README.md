@@ -59,6 +59,59 @@ $data = $cache->get_data('identity_keyword', 'http://some.api.com/file.json');
 var_dump($data);
 ```
 
+## API Methods
+
+```php
+$data = "Some data to cache";
+
+// Call EasyCache
+$cache = new iProDev\Util\EasyCache();
+
+// SET a Data into Cache
+$cache->set('identity_keyword', $data);
+
+// GET a Data from Cache
+$data = $cache->get('identity_keyword');
+
+// Check that the data is cached
+$is_cached = $cache->is_cached('identity_keyword');
+
+// Get the Data from URL and cache it
+$data = $cache->get_data('identity_keyword', 'http://search.twitter.com/search.atom?q=from:chawroka&rpp=1');
+
+// Helper function for retrieving data from url without cache
+$data = $cache->get_contents('http://search.twitter.com/search.atom?q=from:chawroka&rpp=1');
+
+// REMOVE a Cache item
+$cache->delete('identity_keyword');
+
+// REMOVES all Cache expired items
+$cache->flush_expired();
+
+// REMOVES all Cache items
+$cache->flush();
+```
+
+
+## Configuration
+
+```php
+// Call EasyCache
+$cache = new iProDev\Util\EasyCache();
+
+// Path to cache folder (with trailing /)
+$cache->cache_path = 'cache/';
+
+// Cache file extension
+$cache->cache_extension = '.cache';
+
+// Length of time to cache a file (in seconds)
+$cache->cache_time = 3600;
+
+// Lossless data compression level. 1 - 9; 0 to disable
+$cache->compress_level = 0;
+```
+
 ## Credits
 
 PHP EasyCache was created by [Hemn Chawroka](http://iprodev.com) from [iProDev](http://iprodev.com). Released under the MIT license.
