@@ -3,7 +3,7 @@
 namespace iProDev\Util;
 
 /*
- * EasyCache v1.1.0
+ * EasyCache v1.2.0
  *
  * By Hemn Chawroka
  * http://iprodev.com
@@ -21,6 +21,8 @@ class EasyCache {
 	public $cache_extension = '.cache';
 	// Compress level, 1 - 9; 0 to disable
 	public $compress_level = 0;
+	// Cache config file name
+	private $config_file = 'EasyCache.config';
 
 	/**
 	 * This is just a functionality wrapper function
@@ -28,10 +30,9 @@ class EasyCache {
 	 * @param {String} $cache_key
 	 * @param {String} $url
 	 *
-	 * @return {Void}
+	 * @return {Mixed}
 	 */
-	public function get_data($cache_key, $url)
-	{
+	public function get_data($cache_key, $url) {
 		if($data = $this->get_cache($cache_key)){
 			return $data;
 		} else {
@@ -42,15 +43,14 @@ class EasyCache {
 	}
 
 	/**
-	 * Set the cache data for the key
+	 * Set the cache item data
 	 *
 	 * @param {String} $cache_key
 	 * @param {Mixed}  $data
 	 *
 	 * @return {Void}
 	 */
-	public function set($cache_key, $data)
-	{
+	public function set($cache_key, $data) {
 		// Serialize
 		$data = $this->maybe_serialize($data);
 
@@ -59,25 +59,33 @@ class EasyCache {
 			$data = $this->compress($data);
 		}
 
+		// Save this cache config into configuration file
+		$this->set_config($cache_key);
+
 		// Put the cache data to the file
 		file_put_contents($this->cache_path . $this->safe_filename($cache_key) . $this->cache_extension, $data);
 	}
 
 	/**
-	 * Get the cache data for the key
+	 * Get the cache item data
 	 *
 	 * @param {String} $cache_key
 	 *
 	 * @return {Mixed}
 	 */
-	public function get($cache_key)
-	{
-		if($this->is_cached($cache_key)){
+	public function get($cache_key) {
+		$config = $this->get_config($cache_key);
+
+		if($this->is_cached($cache_key, $config)) {
 			// Get the cache data from the file
 			$data = file_get_contents($this->cache_path . $this->safe_filename($cache_key) . $this->cache_extension);
+			$uncompress = $this->compress_level > 0;
+
+			if ($config && isset($config['compressed']))
+				$uncompress = true;
 
 			// Uncompress
-			if ($this->compress_level > 0) {
+			if ($uncompress) {
 				$data = $this->uncompress($data);
 			}
 
@@ -91,17 +99,148 @@ class EasyCache {
 	}
 
 	/**
-	 * Make sure that cache is available for the key
+	 * Delete the cache item
 	 *
 	 * @param {String} $cache_key
 	 *
 	 * @return {Boolean}
 	 */
-	public function is_cached($cache_key)
-	{
-		$filename = $this->cache_path . $this->safe_filename($cache_key) . $this->cache_extension;
+	public function delete($cache_key) {
+		$config_file = $this->cache_path . $this->config_file;
 
-		if(file_exists($filename) && (filemtime($filename) + $this->cache_time >= time())) return true;
+		if (!file_exists($config_file))
+			return false;
+
+		$items = unserialize(file_get_contents($config_file));
+		$file = $this->cache_path . $this->safe_filename($cache_key) . $this->cache_extension;
+
+		// Delete the cache and its config
+		if(file_exists($file)) {
+			@unlink($file);
+			unset($items[$key]);
+		}
+
+		// Put the new cache config to the file
+		file_put_contents($config_file, serialize($items));
+
+		return true;
+	}
+
+	/**
+	 * Removes all EasyCache expired items
+	 *
+	 * @param {String} $cache_key
+	 *
+	 * @return {Boolean}
+	 */
+	public function flush_expired() {
+		$config_file = $this->cache_path . $this->config_file;
+
+		if (!file_exists($config_file))
+			return false;
+
+		$items = unserialize(file_get_contents($config_file));
+		$time = time();
+
+		foreach ($items as $key => $value) {
+			$file = $this->cache_path . $this->safe_filename($key) . $this->cache_extension;
+
+			// Delete the cache and its config
+			if(file_exists($file) && (filemtime($file) + $value['cache_time'] < $time)) {
+				@unlink($file);
+				unset($items[$key]);
+			}
+		}
+
+		// Put the new cache config to the file
+		file_put_contents($config_file, serialize($items));
+
+		return true;
+	}
+
+	/**
+	 * Removes all EasyCache items
+	 *
+	 * @param {String} $cache_key
+	 *
+	 * @return {Boolean}
+	 */
+	public function flush() {
+		$config_file = $this->cache_path . $this->config_file;
+
+		foreach (glob($this->cache_path . "*" . $this->cache_extension) as $file) {
+			// Remove the cache item
+			if (file_exists($file))
+				@unlink($file);
+		}
+
+		// Remove the EasyCache config file
+		if (file_exists($config_file))
+			@unlink($config_file);
+
+		return true;
+	}
+
+	/**
+	 * Make sure that cache is available for the key
+	 *
+	 * @param {String} $cache_key
+	 * @param {Array}  $config
+	 *
+	 * @return {Boolean}
+	 */
+	public function is_cached($cache_key, $config = null) {
+		$file       = $this->cache_path . $this->safe_filename($cache_key) . $this->cache_extension;
+		$cache_time = $this->cache_time;
+
+		if ($config && isset($config['cache_time']))
+			$cache_time = intval($config['cache_time']);
+
+		if(file_exists($file) && (filemtime($file) + $cache_time >= time())) return true;
+
+		return false;
+	}
+
+	/**
+	 * Set the config for the key
+	 *
+	 * @param {String} $cache_key
+	 *
+	 * @return {Boolean}
+	 */
+	private function set_config($cache_key) {
+		$config_file = $this->cache_path . $this->config_file;
+		$configs = array();
+
+		if (file_exists($config_file))
+			$configs = unserialize(file_get_contents($config_file));
+
+		$configs[$cache_key] = array (
+			'compressed' => $this->compress_level > 0,
+			'cache_time' => $this->cache_time
+		);
+
+		// Put the cache config to the file
+		file_put_contents($config_file, serialize($configs));
+
+		return true;
+	}
+
+	/**
+	 * Get the config for the key
+	 *
+	 * @param {String} $cache_key
+	 *
+	 * @return {Mixed}
+	 */
+	private function get_config($cache_key) {
+		$config_file = $this->cache_path . $this->config_file;
+
+		if (file_exists($config_file)) {
+			$config = unserialize(file_get_contents($config_file));
+			if (isset($config[$cache_key]))
+				return $config[$cache_key];
+		}
 
 		return false;
 	}
@@ -113,8 +252,7 @@ class EasyCache {
 	 *
 	 * @return {String}
 	 */
-	public function get_contents($url)
-	{
+	public function get_contents($url) {
 		$content = null;
 
 		if(function_exists("curl_init")){
@@ -142,8 +280,7 @@ class EasyCache {
 	 *
 	 * @return {String}
 	 */
-	private function safe_filename($filename)
-	{
+	private function safe_filename($filename) {
 		return preg_replace('/[^0-9a-z\.\_\-]/i','', strtolower($filename));
 	}
 
