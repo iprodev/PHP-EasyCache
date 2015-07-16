@@ -9,7 +9,7 @@ Install via [composer](https://getcomposer.org):
 ```javascript
 {
     "require": {
-        "iprodev/php-easycache": "~1.0"
+        "iprodev/php-easycache": "~1.2"
     }
 }
 ```
