@@ -1,5 +1,9 @@
 # Changelog
 
+**1.2.1** :: *February 13, 2016*
+
+- Fixed uncompress bug.
+
 **1.2.0** :: *July 13, 2015*
 
 - Implemented cache config file to save the cache file configurations.

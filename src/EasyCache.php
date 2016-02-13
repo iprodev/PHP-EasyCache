@@ -3,7 +3,7 @@
 namespace iProDev\Util;
 
 /*
- * EasyCache v1.2.0
+ * EasyCache v1.2.1
  *
  * By Hemn Chawroka
  * http://iprodev.com
@@ -81,7 +81,7 @@ class EasyCache {
 			$data = file_get_contents($this->cache_path . $this->safe_filename($cache_key) . $this->cache_extension);
 			$uncompress = $this->compress_level > 0;
 
-			if ($config && isset($config['compressed']))
+			if ($config && isset($config['compressed']) && $config['compressed'])
 				$uncompress = true;
 
 			// Uncompress
