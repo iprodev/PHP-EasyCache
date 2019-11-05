@@ -421,6 +421,6 @@ class EasyCache {
 	 *	@return	{Boolean}           true if valid, false if not
 	 */
 	private function is_json($string) {
-		return $string && @is_array(json_decode($string));
+		return $string && @is_array(json_decode($string, true));
 	}
 }
