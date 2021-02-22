@@ -322,7 +322,7 @@ class EasyCache {
 	 * @return {Number}
 	 */
 	private function within($number, $min, $max) {
-		return $number < $min ? $min : $number > $max ? $max : $number;
+		return ($number < $min) ? $min : ($number > $max ? $max : $number);
 	}
 
 	/**
