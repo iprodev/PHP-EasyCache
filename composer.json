@@ -1,6 +1,6 @@
 {
   "name": "iprodev/php-easycache",
-  "description": "PHP EasyCache is a lightweight, file‑based PHP caching library that speeds up repeated API calls with thread‑safe writes, per‑key TTLs, automatic cleanup, key sanitization, and optional compression.",
+  "description": "PHP EasyCache is a lightweight, multi-backend (APCu/Redis/File/PDO) with SWR caching library that speeds up repeated API calls with thread‑safe writes, per‑key TTLs, automatic cleanup, key sanitization, and optional compression.",
   "type": "library",
   "license": "MIT",
   "require": {
