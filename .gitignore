@@ -1,6 +1,8 @@
 /vendor/
-/tmp/
+/composer.lock
+/.phpunit.cache/
+/build/
 /cache/
-/.idea/
-/.vscode/
-composer.lock
+/coverage/
+.DS_Store
+.idea/

@@ -1,0 +1,20 @@
+#!/usr/bin/env php
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use Iprodev\EasyCache\Cache\MultiTierCache;
+use Iprodev\EasyCache\Storage\FileStorage;
+use Iprodev\EasyCache\Serialization\NativeSerializer;
+use Iprodev\EasyCache\Compression\NullCompressor;
+
+// Usage: bin/easycache-prune /path/to/cache
+$path = $argv[1] ?? null;
+if (!$path) {
+    fwrite(STDERR, "Usage: easycache-prune /path/to/cache\n");
+    exit(1);
+}
+$cache = new MultiTierCache([ new FileStorage($path) ], new NativeSerializer(), new NullCompressor(), 0);
+$count = $cache->prune();
+echo "Pruned {$count} expired entries.\n";
