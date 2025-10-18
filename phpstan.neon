@@ -1,0 +1,12 @@
+parameters:
+    level: 8
+    paths:
+        - src
+    excludePaths:
+        - tests
+    tmpDir: .phpstan
+    checkMissingIterableValueType: false
+    checkGenericClassInNonGenericObjectType: false
+    ignoreErrors:
+        # Allow dynamic properties in tests
+        - '#Access to an undefined property#'

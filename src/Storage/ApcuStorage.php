@@ -10,12 +10,18 @@ final class ApcuStorage implements StorageInterface
     public function __construct(string $prefix = 'ec:')
     {
         if (!function_exists('apcu_fetch')) {
-            throw new \RuntimeException('APCu extension is not available');
+            throw new \RuntimeException('APCu extension is not available. Install ext-apcu to use ApcuStorage.');
+        }
+        if (!ini_get('apc.enabled') || (PHP_SAPI === 'cli' && !ini_get('apc.enable_cli'))) {
+            throw new \RuntimeException('APCu is not enabled. Check your php.ini configuration.');
         }
         $this->prefix = $prefix;
     }
 
-    private function k(string $key): string { return $this->prefix . $key; }
+    private function k(string $key): string 
+    { 
+        return $this->prefix . $key; 
+    }
 
     public function get(string $key): ?string
     {
@@ -26,7 +32,11 @@ final class ApcuStorage implements StorageInterface
 
     public function set(string $key, string $payload, int $ttl): bool
     {
-        return apcu_store($this->k($key), $payload, $ttl);
+        $result = apcu_store($this->k($key), $payload, $ttl);
+        if (!$result) {
+            error_log("APCu store failed for key: {$key}");
+        }
+        return $result;
     }
 
     public function delete(string $key): bool
@@ -36,13 +46,39 @@ final class ApcuStorage implements StorageInterface
 
     public function has(string $key): bool
     {
-        $ok = false; apcu_fetch($this->k($key), $ok); return $ok;
+        $ok = false; 
+        apcu_fetch($this->k($key), $ok); 
+        return $ok;
     }
 
+    /**
+     * Clear only keys with the configured prefix.
+     * This is safer than apcu_clear_cache() which clears ALL APCu data.
+     */
     public function clear(): bool
     {
-        return apcu_clear_cache();
+        $iterator = new \APCUIterator('/^' . preg_quote($this->prefix, '/') . '/');
+        $deleted = 0;
+        $failed = 0;
+        
+        foreach ($iterator as $item) {
+            if (apcu_delete($item['key'])) {
+                $deleted++;
+            } else {
+                $failed++;
+            }
+        }
+        
+        if ($failed > 0) {
+            error_log("APCu clear: deleted {$deleted} keys, failed to delete {$failed} keys");
+        }
+        
+        return $failed === 0;
     }
 
-    public function prune(): int { return 0; }
+    public function prune(): int 
+    { 
+        // APCu handles expiration automatically
+        return 0; 
+    }
 }

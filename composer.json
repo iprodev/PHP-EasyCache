@@ -3,6 +3,28 @@
   "description": "PHP EasyCache is a lightweight, multi-backend (APCu/Redis/File/PDO) with SWR caching library that speeds up repeated API calls with thread‑safe writes, per‑key TTLs, automatic cleanup, key sanitization, and optional compression.",
   "type": "library",
   "license": "MIT",
+  "keywords": [
+    "cache",
+    "psr-16",
+    "swr",
+    "stale-while-revalidate",
+    "file cache",
+    "redis",
+    "apcu",
+    "sqlite",
+    "mysql",
+    "postgresql",
+    "multi-tier",
+    "compression",
+    "serialization",
+    "laravel"
+  ],
+  "authors": [
+    {
+      "name": "iprodev",
+      "email": "dev@iprodev.com"
+    }
+  ],
   "require": {
     "php": "^8.1",
     "psr/simple-cache": "^3.0",
@@ -13,6 +35,14 @@
     "phpstan/phpstan": "^1.12",
     "squizlabs/php_codesniffer": "^3.9"
   },
+  "suggest": {
+    "ext-apcu": "To use APCu backend for ultra-fast in-memory caching",
+    "ext-redis": "To use phpredis for Redis backend",
+    "predis/predis": "^2.0 - To use predis client instead of phpredis",
+    "ext-zlib": "To use GzipCompressor for data compression",
+    "ext-zstd": "To use ZstdCompressor for faster data compression",
+    "monolog/monolog": "^3.0 - For comprehensive logging support"
+  },
   "autoload": {
     "psr-4": {
       "Iprodev\\EasyCache\\": "src/"
@@ -22,13 +52,6 @@
     "psr-4": {
       "Iprodev\\EasyCache\\Tests\\": "tests/"
     }
-  },
-  "suggest": {
-    "ext-apcu": "To use APCu backend",
-    "ext-redis": "To use phpredis for Redis backend",
-    "predis/predis": "To use predis client instead of phpredis",
-    "ext-zlib": "To use GzipCompressor",
-    "ext-zstd": "To use ZstdCompressor"
   },
   "extra": {
     "laravel": {
@@ -42,21 +65,38 @@
   },
   "scripts": {
     "test": "phpunit --colors=always",
-    "stan": "phpstan analyse --memory-limit=512M",
-    "cs": "phpcs --standard=PSR12 src"
+    "test:coverage": "phpunit --colors=always --coverage-html coverage --coverage-text",
+    "test:filter": "phpunit --colors=always --filter",
+    "stan": "phpstan analyse --memory-limit=512M --level=8 src",
+    "stan:baseline": "phpstan analyse --memory-limit=512M --level=8 --generate-baseline",
+    "cs": "phpcs --standard=PSR12 src tests",
+    "cs:fix": "phpcbf --standard=PSR12 src tests",
+    "qa": [
+      "@cs",
+      "@stan",
+      "@test"
+    ],
+    "docs": "echo 'See API.md, README.md, and EXAMPLES.md for documentation'"
+  },
+  "scripts-descriptions": {
+    "test": "Run all PHPUnit tests",
+    "test:coverage": "Run tests with HTML coverage report",
+    "test:filter": "Run specific test by name (e.g., composer test:filter testSetAndGet)",
+    "stan": "Run PHPStan static analysis",
+    "stan:baseline": "Generate PHPStan baseline for existing issues",
+    "cs": "Check code style (PSR-12)",
+    "cs:fix": "Fix code style issues automatically",
+    "qa": "Run all quality assurance checks (cs, stan, test)",
+    "docs": "Show documentation files"
   },
   "bin": [
     "bin/easycache-prune"
   ],
-  "keywords": [
-    "cache",
-    "psr-16",
-    "swr",
-    "file cache",
-    "redis",
-    "apcu",
-    "sqlite",
-    "mysql",
-    "postgresql"
-  ]
+  "config": {
+    "sort-packages": true,
+    "optimize-autoloader": true,
+    "preferred-install": "dist"
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
 }
