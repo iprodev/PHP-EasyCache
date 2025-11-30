@@ -15,12 +15,7 @@ composer.lock
 /coverage/
 .phpunit.result.cache
 phpunit.xml.dist
-
-# Output
-/output/
-/sitemaps/
-*.xml
-*.xml.gz
+.phpstan/
 
 # Logs
 *.log

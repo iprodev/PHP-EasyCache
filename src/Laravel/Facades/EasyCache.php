@@ -9,8 +9,7 @@ use Illuminate\Support\Facades\Facade;
 /**
  * @method static mixed get(string $key, mixed $default = null)
  * @method static bool set(string $key, mixed $value, null|int|\DateInterval $ttl = null)
- * @method static mixed getOrSetSWR(string $key, callable $producer, null|int|\DateInterval $ttl = null,
- *     int $swrSeconds = 0, int $staleIfErrorSeconds = 0, array $options = [])
+ * @method static mixed getOrSetSWR(string $key, callable $producer, int|null $ttl = null)
  */
 final class EasyCache extends Facade
 {

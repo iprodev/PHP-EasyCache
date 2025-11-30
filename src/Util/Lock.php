@@ -7,7 +7,8 @@ namespace Iprodev\EasyCache\Util;
 final class Lock
 {
     private string $path;
-    private $fp;
+    /** @var resource|closed-resource|false|null */
+    private mixed $fp = null;
 
     public function __construct(string $path)
     {

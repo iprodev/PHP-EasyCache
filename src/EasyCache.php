@@ -25,8 +25,8 @@ final class EasyCache extends MultiTierCache
      */
     public function __construct(array $options = [])
     {
-        $path       = rtrim($options['cache_path'] ?? __DIR__ . '/../cache', '/');
-        $ext        = $options['cache_extension'] ?? '.cache';
+        $path       = rtrim((string)($options['cache_path'] ?? __DIR__ . '/../cache'), '/');
+        $ext        = (string)($options['cache_extension'] ?? '.cache');
         $shards     = max(0, min(3, (int)($options['directory_shards'] ?? 2)));
         $defaultTtl = max(0, (int)($options['cache_time'] ?? 3600));
 

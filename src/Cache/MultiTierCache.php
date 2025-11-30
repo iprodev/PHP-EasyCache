@@ -16,7 +16,7 @@ use Iprodev\EasyCache\Exceptions\InvalidArgument;
 use Iprodev\EasyCache\Util\KeyValidator;
 use Iprodev\EasyCache\Util\Lock;
 
-final class MultiTierCache implements CacheInterface
+class MultiTierCache implements CacheInterface
 {
     /** @var StorageInterface[] */
     private array $tiers;
@@ -351,9 +351,13 @@ final class MultiTierCache implements CacheInterface
             return ['value' => null];
         }
 
-        $expired = ($record['e'] > 0 && $record['e'] < $now);
-        $within_swr = $expired && ($record['swr'] > 0) && ($now < $record['e'] + $record['swr']);
-        $within_sei = $expired && ($record['sei'] > 0) && ($now < $record['e'] + $record['sei']);
+        $expires = (int)$record['e'];
+        $swr = (int)$record['swr'];
+        $sei = (int)$record['sei'];
+
+        $expired = ($expires > 0 && $expires < $now);
+        $within_swr = $expired && ($swr > 0) && ($now < $expires + $swr);
+        $within_sei = $expired && ($sei > 0) && ($now < $expires + $sei);
 
         // Return null if expired and stale is not allowed
         if ($expired && !$allowStale) {
@@ -361,15 +365,15 @@ final class MultiTierCache implements CacheInterface
         }
 
         // Return null if expired and outside SWR/SEI windows
-        if ($expired && $allowStale && !($within_swr || $within_sei)) {
+        if ($expired && !$within_swr && !$within_sei) {
             return ['value' => null];
         }
 
         // Backfill to faster tiers
         if ($backfill && $tierIndex > 0) {
-            $ttl = $this->visibleTtl($record['e'], $record['swr'], $record['sei']);
+            $ttl = $this->visibleTtl($expires, $swr, $sei);
             if ($ttl > 0) {
-                $payload = $this->encodeRecord($record['v'], $record['e'], $record['swr'], $record['sei']);
+                $payload = $this->encodeRecord($record['v'], $expires, $swr, $sei);
                 for ($j = 0; $j < $tierIndex; $j++) {
                     try {
                         $this->tiers[$j]->set($key, $payload, $ttl);

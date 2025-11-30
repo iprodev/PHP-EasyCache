@@ -4,9 +4,11 @@ parameters:
         - src
     excludePaths:
         - tests
+        - src/Laravel
     tmpDir: .phpstan
-    checkMissingIterableValueType: false
-    checkGenericClassInNonGenericObjectType: false
     ignoreErrors:
-        # Allow dynamic properties in tests
-        - '#Access to an undefined property#'
+        - identifier: missingType.iterableValue
+        # Predis is optional - ignore all related errors
+        -
+            message: '#Predis#'
+            path: src/Storage/RedisStorage.php
