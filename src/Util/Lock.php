@@ -27,9 +27,10 @@ final class Lock
 
     public function release(): void
     {
-        if ($this->fp) {
+        if ($this->fp !== null && $this->fp !== false) {
             @flock($this->fp, LOCK_UN);
             @fclose($this->fp);
+            $this->fp = null;
         }
     }
 
