@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Laravel;
@@ -22,7 +23,7 @@ final class EasyCacheServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        $this->mergeConfigFrom(__DIR__.'/../../config/easycache.php', 'easycache');
+        $this->mergeConfigFrom(__DIR__ . '/../../config/easycache.php', 'easycache');
 
         $this->app->singleton('easycache', function ($app) {
             $cfg = $app['config']->get('easycache', []);
@@ -37,12 +38,17 @@ final class EasyCacheServiceProvider extends ServiceProvider
                         $tiers[] = $this->makeRedis($cfg['redis'] ?? []);
                         break;
                     case 'file':
-                        $tiers[] = new FileStorage($cfg['file']['path'] ?? storage_path('framework/cache/easycache'), $cfg['file']['ext'] ?? '.cache', $cfg['file']['shards'] ?? 2);
+                        $path = $cfg['file']['path'] ?? storage_path('framework/cache/easycache');
+                        $ext = $cfg['file']['ext'] ?? '.cache';
+                        $shards = $cfg['file']['shards'] ?? 2;
+                        $tiers[] = new FileStorage($path, $ext, $shards);
                         break;
                     case 'pdo':
                         $pdo = $this->makePdo($cfg['pdo'] ?? []);
                         $pdoStore = new PdoStorage($pdo, $cfg['pdo']['table'] ?? 'easycache');
-                        if (($cfg['pdo']['auto_create'] ?? true) === true) { $pdoStore->ensureTable(); }
+                        if (($cfg['pdo']['auto_create'] ?? true) === true) {
+                            $pdoStore->ensureTable();
+                        }
                         $tiers[] = $pdoStore;
                         break;
                 }
@@ -73,7 +79,7 @@ final class EasyCacheServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->publishes([
-            __DIR__.'/../../config/easycache.php' => config_path('easycache.php')
+            __DIR__ . '/../../config/easycache.php' => config_path('easycache.php')
         ], 'easycache-config');
     }
 
@@ -92,8 +98,12 @@ final class EasyCacheServiceProvider extends ServiceProvider
         } else {
             $r = new Redis();
             $r->connect($cfg['host'] ?? '127.0.0.1', (int)($cfg['port'] ?? 6379), 1.5);
-            if (!empty($cfg['password'])) { $r->auth($cfg['password']); }
-            if (isset($cfg['database'])) { $r->select((int)$cfg['database']); }
+            if (!empty($cfg['password'])) {
+                $r->auth($cfg['password']);
+            }
+            if (isset($cfg['database'])) {
+                $r->select((int)$cfg['database']);
+            }
             return new RedisStorage($r, $cfg['prefix'] ?? 'ec:');
         }
     }

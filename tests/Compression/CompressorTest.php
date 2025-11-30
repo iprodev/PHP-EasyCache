@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Tests\Compression;
@@ -13,13 +14,13 @@ class CompressorTest extends TestCase
     public function testNullCompressor(): void
     {
         $compressor = new NullCompressor();
-        
+
         $this->assertEquals('none', $compressor->name());
-        
+
         $data = 'test data that should not be compressed';
         $compressed = $compressor->compress($data);
         $this->assertEquals($data, $compressed);
-        
+
         $decompressed = $compressor->decompress($compressed);
         $this->assertEquals($data, $decompressed);
     }
@@ -31,15 +32,15 @@ class CompressorTest extends TestCase
         }
 
         $compressor = new GzipCompressor(5);
-        
+
         $this->assertEquals('gzip', $compressor->name());
-        
+
         $data = str_repeat('This is test data for compression. ', 100);
         $compressed = $compressor->compress($data);
-        
+
         // Compressed should be smaller than original
         $this->assertLessThan(strlen($data), strlen($compressed));
-        
+
         $decompressed = $compressor->decompress($compressed);
         $this->assertEquals($data, $decompressed);
     }
@@ -51,16 +52,16 @@ class CompressorTest extends TestCase
         }
 
         $data = str_repeat('Test data for compression levels. ', 1000);
-        
+
         $compressor1 = new GzipCompressor(1);
         $compressor9 = new GzipCompressor(9);
-        
+
         $compressed1 = $compressor1->compress($data);
         $compressed9 = $compressor9->compress($data);
-        
+
         // Higher compression level should result in smaller size
         $this->assertLessThanOrEqual(strlen($compressed1), strlen($compressed9) + 100);
-        
+
         $this->assertEquals($data, $compressor1->decompress($compressed1));
         $this->assertEquals($data, $compressor9->decompress($compressed9));
     }
@@ -72,15 +73,15 @@ class CompressorTest extends TestCase
         }
 
         $compressor = new ZstdCompressor(3);
-        
+
         $this->assertEquals('zstd', $compressor->name());
-        
+
         $data = str_repeat('This is test data for Zstd compression. ', 100);
         $compressed = $compressor->compress($data);
-        
+
         // Compressed should be smaller than original
         $this->assertLessThan(strlen($data), strlen($compressed));
-        
+
         $decompressed = $compressor->decompress($compressed);
         $this->assertEquals($data, $decompressed);
     }
@@ -92,12 +93,12 @@ class CompressorTest extends TestCase
         }
 
         $compressor = new GzipCompressor(3);
-        
+
         // 1MB of data
         $data = str_repeat('Large data block for compression testing. ', 25000);
         $compressed = $compressor->compress($data);
         $decompressed = $compressor->decompress($compressed);
-        
+
         $this->assertEquals($data, $decompressed);
         $this->assertLessThan(strlen($data), strlen($compressed));
     }
@@ -109,7 +110,7 @@ class CompressorTest extends TestCase
         }
 
         $compressor = new GzipCompressor(5);
-        
+
         $this->expectException(\RuntimeException::class);
         $compressor->decompress('invalid compressed data');
     }
@@ -121,7 +122,7 @@ class CompressorTest extends TestCase
         }
 
         $compressor = new ZstdCompressor(3);
-        
+
         $this->expectException(\RuntimeException::class);
         $compressor->decompress('invalid compressed data');
     }

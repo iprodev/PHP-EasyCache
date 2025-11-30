@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Storage;
@@ -15,21 +16,23 @@ final class RedisStorage implements StorageInterface
      */
     public function __construct($redisClient, string $prefix = 'ec:')
     {
-        if (!($redisClient instanceof \Redis) && 
-            !interface_exists('Predis\ClientInterface') || 
-            !($redisClient instanceof \Predis\ClientInterface)) {
+        if (
+            !($redisClient instanceof \Redis) &&
+            !interface_exists('Predis\ClientInterface') ||
+            !($redisClient instanceof \Predis\ClientInterface)
+        ) {
             throw new \InvalidArgumentException(
                 'Redis client must be instance of \Redis or \Predis\ClientInterface'
             );
         }
-        
+
         $this->redis = $redisClient;
         $this->prefix = $prefix;
     }
 
-    private function k(string $key): string 
-    { 
-        return $this->prefix . $key; 
+    private function k(string $key): string
+    {
+        return $this->prefix . $key;
     }
 
     public function get(string $key): ?string
@@ -47,11 +50,11 @@ final class RedisStorage implements StorageInterface
     {
         try {
             $k = $this->k($key);
-            
+
             if ($ttl > 0) {
                 return (bool) $this->redis->setex($k, $ttl, $payload);
             }
-            
+
             return (bool) $this->redis->set($k, $payload);
         } catch (\Throwable $e) {
             error_log("Redis set failed for key {$key}: " . $e->getMessage());
@@ -88,7 +91,7 @@ final class RedisStorage implements StorageInterface
         try {
             $deleted = 0;
             $pattern = $this->prefix . '*';
-            
+
             // Use SCAN for phpredis or keys() for predis
             if ($this->redis instanceof \Redis) {
                 if (method_exists($this->redis, 'scan')) {
@@ -119,7 +122,7 @@ final class RedisStorage implements StorageInterface
                     $deleted += count($keys);
                 }
             }
-            
+
             return true;
         } catch (\Throwable $e) {
             error_log("Redis clear failed: " . $e->getMessage());
@@ -130,8 +133,8 @@ final class RedisStorage implements StorageInterface
     /**
      * Redis handles expiration automatically via TTL.
      */
-    public function prune(): int 
-    { 
-        return 0; 
+    public function prune(): int
+    {
+        return 0;
     }
 }

@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Tests\Cache;
@@ -54,7 +55,7 @@ class MultiTierCacheTest extends TestCase
     {
         $this->assertTrue($this->cache->set('ttl_key', 'value', 1));
         $this->assertEquals('value', $this->cache->get('ttl_key'));
-        
+
         sleep(2);
         $this->assertNull($this->cache->get('ttl_key'));
     }
@@ -63,7 +64,7 @@ class MultiTierCacheTest extends TestCase
     {
         $this->cache->set('delete_key', 'value');
         $this->assertTrue($this->cache->has('delete_key'));
-        
+
         $this->assertTrue($this->cache->delete('delete_key'));
         $this->assertFalse($this->cache->has('delete_key'));
     }
@@ -72,9 +73,9 @@ class MultiTierCacheTest extends TestCase
     {
         $this->cache->set('key1', 'value1');
         $this->cache->set('key2', 'value2');
-        
+
         $this->assertTrue($this->cache->clear());
-        
+
         $this->assertFalse($this->cache->has('key1'));
         $this->assertFalse($this->cache->has('key2'));
     }
@@ -82,7 +83,7 @@ class MultiTierCacheTest extends TestCase
     public function testHas(): void
     {
         $this->assertFalse($this->cache->has('nonexistent'));
-        
+
         $this->cache->set('exists', 'value');
         $this->assertTrue($this->cache->has('exists'));
     }
@@ -91,9 +92,9 @@ class MultiTierCacheTest extends TestCase
     {
         $this->cache->set('key1', 'value1');
         $this->cache->set('key2', 'value2');
-        
+
         $result = $this->cache->getMultiple(['key1', 'key2', 'key3'], 'default');
-        
+
         $this->assertEquals([
             'key1' => 'value1',
             'key2' => 'value2',
@@ -108,9 +109,9 @@ class MultiTierCacheTest extends TestCase
             'multi2' => 'value2',
             'multi3' => 'value3'
         ];
-        
+
         $this->assertTrue($this->cache->setMultiple($values));
-        
+
         $this->assertEquals('value1', $this->cache->get('multi1'));
         $this->assertEquals('value2', $this->cache->get('multi2'));
         $this->assertEquals('value3', $this->cache->get('multi3'));
@@ -120,9 +121,9 @@ class MultiTierCacheTest extends TestCase
     {
         $this->cache->set('del1', 'value1');
         $this->cache->set('del2', 'value2');
-        
+
         $this->assertTrue($this->cache->deleteMultiple(['del1', 'del2']));
-        
+
         $this->assertFalse($this->cache->has('del1'));
         $this->assertFalse($this->cache->has('del2'));
     }
@@ -137,10 +138,10 @@ class MultiTierCacheTest extends TestCase
             'nested' => ['key' => 'value'],
             'object' => (object)['prop' => 'value']
         ];
-        
+
         $this->cache->set('complex', $data);
         $retrieved = $this->cache->get('complex');
-        
+
         $this->assertEquals($data['string'], $retrieved['string']);
         $this->assertEquals($data['int'], $retrieved['int']);
         $this->assertEquals($data['float'], $retrieved['float']);
@@ -222,7 +223,7 @@ class MultiTierCacheTest extends TestCase
 
         $data = ['key' => 'value', 'number' => 42];
         $cache->set('json_test', $data);
-        
+
         $result = $cache->get('json_test');
         $this->assertEquals($data, $result);
 
@@ -244,7 +245,7 @@ class MultiTierCacheTest extends TestCase
 
         $largeData = str_repeat('This is a test string for compression. ', 1000);
         $cache->set('gzip_test', $largeData);
-        
+
         $result = $cache->get('gzip_test');
         $this->assertEquals($largeData, $result);
 

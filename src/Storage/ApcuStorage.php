@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Storage;
@@ -18,9 +19,9 @@ final class ApcuStorage implements StorageInterface
         $this->prefix = $prefix;
     }
 
-    private function k(string $key): string 
-    { 
-        return $this->prefix . $key; 
+    private function k(string $key): string
+    {
+        return $this->prefix . $key;
     }
 
     public function get(string $key): ?string
@@ -46,8 +47,8 @@ final class ApcuStorage implements StorageInterface
 
     public function has(string $key): bool
     {
-        $ok = false; 
-        apcu_fetch($this->k($key), $ok); 
+        $ok = false;
+        apcu_fetch($this->k($key), $ok);
         return $ok;
     }
 
@@ -60,7 +61,7 @@ final class ApcuStorage implements StorageInterface
         $iterator = new \APCUIterator('/^' . preg_quote($this->prefix, '/') . '/');
         $deleted = 0;
         $failed = 0;
-        
+
         foreach ($iterator as $item) {
             if (apcu_delete($item['key'])) {
                 $deleted++;
@@ -68,17 +69,17 @@ final class ApcuStorage implements StorageInterface
                 $failed++;
             }
         }
-        
+
         if ($failed > 0) {
             error_log("APCu clear: deleted {$deleted} keys, failed to delete {$failed} keys");
         }
-        
+
         return $failed === 0;
     }
 
-    public function prune(): int 
-    { 
+    public function prune(): int
+    {
         // APCu handles expiration automatically
-        return 0; 
+        return 0;
     }
 }

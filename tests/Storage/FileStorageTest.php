@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Tests\Storage;
@@ -100,7 +101,7 @@ class FileStorageTest extends TestCase
     public function testConcurrentWrites(): void
     {
         $key = 'concurrent_key';
-        
+
         // Simulate multiple writes (atomic rename should handle this)
         $this->storage->set($key, 'data1', 3600);
         $this->storage->set($key, 'data2', 3600);

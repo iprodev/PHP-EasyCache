@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Serialization;
@@ -13,5 +14,8 @@ final class JsonSerializer implements SerializerInterface
     {
         return json_decode($payload, true, 512, JSON_THROW_ON_ERROR);
     }
-    public function name(): string { return 'json'; }
+    public function name(): string
+    {
+        return 'json';
+    }
 }

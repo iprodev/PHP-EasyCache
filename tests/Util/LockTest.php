@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Tests\Util;
@@ -36,7 +37,7 @@ class LockTest extends TestCase
 
         $this->assertTrue($lock->acquire(true));
         $lock->release();
-        
+
         // Lock file should exist
         $this->assertFileExists($lockPath);
     }
@@ -44,14 +45,14 @@ class LockTest extends TestCase
     public function testBlockingLock(): void
     {
         $lockPath = $this->lockDir . '/blocking.lock';
-        
+
         $lock1 = new Lock($lockPath);
         $this->assertTrue($lock1->acquire(true));
-        
+
         // Second lock should wait (we can't test actual blocking easily)
         // but we can test that it succeeds after first is released
         $lock1->release();
-        
+
         $lock2 = new Lock($lockPath);
         $this->assertTrue($lock2->acquire(true));
         $lock2->release();
@@ -60,16 +61,16 @@ class LockTest extends TestCase
     public function testNonBlockingLock(): void
     {
         $lockPath = $this->lockDir . '/nonblocking.lock';
-        
+
         $lock1 = new Lock($lockPath);
         $this->assertTrue($lock1->acquire(true));
-        
+
         // Second lock should fail immediately with non-blocking
         $lock2 = new Lock($lockPath);
         $this->assertFalse($lock2->acquire(false));
-        
+
         $lock1->release();
-        
+
         // Now it should succeed
         $this->assertTrue($lock2->acquire(false));
         $lock2->release();
@@ -78,13 +79,13 @@ class LockTest extends TestCase
     public function testAutomaticReleaseOnDestruct(): void
     {
         $lockPath = $this->lockDir . '/destruct.lock';
-        
+
         $lock1 = new Lock($lockPath);
         $this->assertTrue($lock1->acquire(true));
-        
+
         // Destroy first lock (should release)
         unset($lock1);
-        
+
         // Second lock should succeed
         $lock2 = new Lock($lockPath);
         $this->assertTrue($lock2->acquire(false));
@@ -96,11 +97,11 @@ class LockTest extends TestCase
         $lock1 = new Lock($this->lockDir . '/lock1.lock');
         $lock2 = new Lock($this->lockDir . '/lock2.lock');
         $lock3 = new Lock($this->lockDir . '/lock3.lock');
-        
+
         $this->assertTrue($lock1->acquire(false));
         $this->assertTrue($lock2->acquire(false));
         $this->assertTrue($lock3->acquire(false));
-        
+
         $lock1->release();
         $lock2->release();
         $lock3->release();
@@ -110,7 +111,7 @@ class LockTest extends TestCase
     {
         $lockPath = $this->lockDir . '/repeated.lock';
         $lock = new Lock($lockPath);
-        
+
         for ($i = 0; $i < 10; $i++) {
             $this->assertTrue($lock->acquire(true));
             $lock->release();

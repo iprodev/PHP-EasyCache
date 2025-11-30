@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Cache;
@@ -39,25 +40,25 @@ final class MultiTierCache implements CacheInterface
      * @param string|null $lockPath
      */
     public function __construct(
-        array $tiers, 
-        ?SerializerInterface $serializer = null, 
-        ?CompressorInterface $compressor = null, 
-        int $defaultTtl = 3600, 
-        ?LoggerInterface $logger = null, 
+        array $tiers,
+        ?SerializerInterface $serializer = null,
+        ?CompressorInterface $compressor = null,
+        int $defaultTtl = 3600,
+        ?LoggerInterface $logger = null,
         ?string $lockPath = null
     ) {
         if (empty($tiers)) {
             throw new \InvalidArgumentException('At least one storage tier is required.');
         }
-        
+
         $this->tiers = $tiers;
         $this->serializer = $serializer ?? new NativeSerializer();
         $this->compressor = $compressor ?? new NullCompressor();
         $this->defaultTtl = max(0, $defaultTtl);
         $this->logger = $logger;
         $this->lockPath = $lockPath ?? sys_get_temp_dir() . '/ec-locks';
-        
-        if (!is_dir($this->lockPath)) { 
+
+        if (!is_dir($this->lockPath)) {
             if (!mkdir($this->lockPath, 0770, true) && !is_dir($this->lockPath)) {
                 throw new \RuntimeException("Failed to create lock directory: {$this->lockPath}");
             }
@@ -67,7 +68,7 @@ final class MultiTierCache implements CacheInterface
     public function get(string $key, mixed $default = null): mixed
     {
         KeyValidator::assert($key);
-        
+
         try {
             $now = time();
             $hit = $this->readThrough($key, $now, false);
@@ -81,17 +82,17 @@ final class MultiTierCache implements CacheInterface
     public function set(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
     {
         KeyValidator::assert($key);
-        
+
         try {
             $seconds = $this->normalizeTtl($ttl);
-            
-            if ($seconds <= 0 && $ttl !== null) { 
-                return $this->delete($key); 
+
+            if ($seconds <= 0 && $ttl !== null) {
+                return $this->delete($key);
             }
-            
+
             $expires = $seconds === 0 ? 0 : (time() + ($seconds > 0 ? $seconds : $this->defaultTtl));
             $payload = $this->encodeRecord($value, $expires, 0, 0);
-            
+
             return $this->writeAllTiers($key, $payload, $this->visibleTtl($expires, 0, 0));
         } catch (\Throwable $e) {
             $this->log('error', "Cache set failed for key '{$key}': " . $e->getMessage());
@@ -102,11 +103,11 @@ final class MultiTierCache implements CacheInterface
     public function delete(string $key): bool
     {
         KeyValidator::assert($key);
-        
+
         $ok = true;
-        foreach ($this->tiers as $t) { 
+        foreach ($this->tiers as $t) {
             try {
-                $ok = $t->delete($key) && $ok; 
+                $ok = $t->delete($key) && $ok;
             } catch (\Throwable $e) {
                 $this->log('warning', "Delete failed on tier for key '{$key}': " . $e->getMessage());
                 $ok = false;
@@ -118,9 +119,9 @@ final class MultiTierCache implements CacheInterface
     public function clear(): bool
     {
         $ok = true;
-        foreach ($this->tiers as $t) { 
+        foreach ($this->tiers as $t) {
             try {
-                $ok = $t->clear() && $ok; 
+                $ok = $t->clear() && $ok;
             } catch (\Throwable $e) {
                 $this->log('warning', "Clear failed on tier: " . $e->getMessage());
                 $ok = false;
@@ -131,39 +132,39 @@ final class MultiTierCache implements CacheInterface
 
     public function getMultiple(iterable $keys, mixed $default = null): iterable
     {
-        if (!is_iterable($keys)) { 
-            throw new InvalidArgument('Keys must be iterable'); 
+        if (!is_iterable($keys)) {
+            throw new InvalidArgument('Keys must be iterable');
         }
-        
+
         $result = [];
-        foreach ($keys as $k) { 
-            $result[$k] = $this->get((string)$k, $default); 
+        foreach ($keys as $k) {
+            $result[$k] = $this->get((string)$k, $default);
         }
         return $result;
     }
 
     public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
     {
-        if (!is_iterable($values)) { 
-            throw new InvalidArgument('Values must be iterable'); 
+        if (!is_iterable($values)) {
+            throw new InvalidArgument('Values must be iterable');
         }
-        
+
         $all = true;
-        foreach ($values as $k => $v) { 
-            $all = $this->set((string)$k, $v, $ttl) && $all; 
+        foreach ($values as $k => $v) {
+            $all = $this->set((string)$k, $v, $ttl) && $all;
         }
         return $all;
     }
 
     public function deleteMultiple(iterable $keys): bool
     {
-        if (!is_iterable($keys)) { 
-            throw new InvalidArgument('Keys must be iterable'); 
+        if (!is_iterable($keys)) {
+            throw new InvalidArgument('Keys must be iterable');
         }
-        
+
         $all = true;
-        foreach ($keys as $k) { 
-            $all = $this->delete((string)$k) && $all; 
+        foreach ($keys as $k) {
+            $all = $this->delete((string)$k) && $all;
         }
         return $all;
     }
@@ -171,7 +172,7 @@ final class MultiTierCache implements CacheInterface
     public function has(string $key): bool
     {
         KeyValidator::assert($key);
-        
+
         try {
             $now = time();
             $hit = $this->readThrough($key, $now, false, false);
@@ -184,7 +185,7 @@ final class MultiTierCache implements CacheInterface
 
     /**
      * Get or set with Stale-While-Revalidate support.
-     * 
+     *
      * @param string $key Cache key
      * @param callable $producer Function to produce fresh value: function(): mixed
      * @param null|int|DateInterval $ttl Fresh data TTL
@@ -194,22 +195,22 @@ final class MultiTierCache implements CacheInterface
      * @return mixed
      */
     public function getOrSetSWR(
-        string $key, 
-        callable $producer, 
-        null|int|DateInterval $ttl = null, 
-        int $swrSeconds = 0, 
-        int $staleIfErrorSeconds = 0, 
+        string $key,
+        callable $producer,
+        null|int|DateInterval $ttl = null,
+        int $swrSeconds = 0,
+        int $staleIfErrorSeconds = 0,
         array $options = []
     ): mixed {
         KeyValidator::assert($key);
-        
+
         $now = time();
         $seconds = $this->normalizeTtl($ttl);
         $freshTtl = $seconds > 0 ? $seconds : $this->defaultTtl;
 
         try {
             $hit = $this->readThrough($key, $now, true);
-            
+
             if ($hit['value'] !== null) {
                 // Trigger background revalidation if in SWR window
                 if ($hit['expired'] && $hit['within_swr']) {
@@ -223,18 +224,18 @@ final class MultiTierCache implements CacheInterface
 
         // Cache miss: compute under per-key lock
         $lock = $this->lockFor($key);
-        if (!$lock->acquire(true)) { 
+        if (!$lock->acquire(true)) {
             $this->log('warning', "Failed to acquire lock for key '{$key}', computing without lock");
-            return $producer(); 
+            return $producer();
         }
-        
+
         try {
             // Double-check after acquiring lock
             $hit2 = $this->readThrough($key, time(), true);
-            if ($hit2['value'] !== null) { 
-                return $hit2['value']; 
+            if ($hit2['value'] !== null) {
+                return $hit2['value'];
             }
-            
+
             // Compute fresh value
             try {
                 $val = $producer();
@@ -253,7 +254,7 @@ final class MultiTierCache implements CacheInterface
 
     /**
      * Prune expired items across tiers.
-     * 
+     *
      * @return int Number of items pruned
      */
     public function prune(): int
@@ -261,7 +262,7 @@ final class MultiTierCache implements CacheInterface
         $sum = 0;
         foreach ($this->tiers as $t) {
             if (method_exists($t, 'prune')) {
-                try { 
+                try {
                     $count = (int)$t->prune();
                     $sum += $count;
                 } catch (\Throwable $e) {
@@ -273,23 +274,23 @@ final class MultiTierCache implements CacheInterface
     }
 
     private function maybeRevalidate(
-        string $key, 
-        callable $producer, 
-        int $freshTtl, 
-        int $swrSeconds, 
-        int $staleIfErrorSeconds, 
+        string $key,
+        callable $producer,
+        int $freshTtl,
+        int $swrSeconds,
+        int $staleIfErrorSeconds,
         array $options
     ): void {
         $mode = $options['mode'] ?? 'sync';
-        
+
         $revalidate = function () use ($key, $producer, $freshTtl, $swrSeconds, $staleIfErrorSeconds): void {
             $lock = $this->lockFor($key);
-            
+
             // Non-blocking lock: if another process is already revalidating, skip
-            if (!$lock->acquire(false)) { 
-                return; 
+            if (!$lock->acquire(false)) {
+                return;
             }
-            
+
             try {
                 $val = $producer();
                 $expires = time() + $freshTtl;
@@ -305,10 +306,10 @@ final class MultiTierCache implements CacheInterface
         // Defer mode: run after response is sent
         if ($mode === 'defer' && function_exists('fastcgi_finish_request')) {
             register_shutdown_function(function () use ($revalidate) {
-                try { 
-                    if (function_exists('fastcgi_finish_request')) { 
-                        @fastcgi_finish_request(); 
-                    } 
+                try {
+                    if (function_exists('fastcgi_finish_request')) {
+                        @fastcgi_finish_request();
+                    }
                 } catch (\Throwable $e) {
                     // Ignore fastcgi_finish_request errors
                 }
@@ -322,9 +323,9 @@ final class MultiTierCache implements CacheInterface
 
     private function readThrough(string $key, int $now, bool $allowStale, bool $backfill = true): array
     {
-        $record = null; 
+        $record = null;
         $tierIndex = -1;
-        
+
         // Read from tiers in order
         foreach ($this->tiers as $i => $tier) {
             try {
@@ -332,20 +333,20 @@ final class MultiTierCache implements CacheInterface
                 if ($raw === null) {
                     continue;
                 }
-                
+
                 $rec = $this->decodeRecord($raw);
                 if ($rec === null) {
                     continue;
                 }
-                
-                $record = $rec; 
-                $tierIndex = $i; 
+
+                $record = $rec;
+                $tierIndex = $i;
                 break;
             } catch (\Throwable $e) {
                 $this->log('warning', "Read failed on tier {$i} for key '{$key}': " . $e->getMessage());
             }
         }
-        
+
         if ($record === null) {
             return ['value' => null];
         }
@@ -358,7 +359,7 @@ final class MultiTierCache implements CacheInterface
         if ($expired && !$allowStale) {
             return ['value' => null];
         }
-        
+
         // Return null if expired and outside SWR/SEI windows
         if ($expired && $allowStale && !($within_swr || $within_sei)) {
             return ['value' => null];
@@ -390,9 +391,9 @@ final class MultiTierCache implements CacheInterface
     private function writeAllTiers(string $key, string $payload, int $ttl): bool
     {
         $ok = true;
-        foreach ($this->tiers as $tier) { 
+        foreach ($this->tiers as $tier) {
             try {
-                $ok = $tier->set($key, $payload, $ttl) && $ok; 
+                $ok = $tier->set($key, $payload, $ttl) && $ok;
             } catch (\Throwable $e) {
                 $this->log('warning', "Write failed on tier for key '{$key}': " . $e->getMessage());
                 $ok = false;
@@ -406,7 +407,7 @@ final class MultiTierCache implements CacheInterface
         if ($expires === 0) {
             return 0;
         }
-        
+
         $maxExtra = max($swr, $sei);
         $ttlUntil = $expires + $maxExtra - time();
         return $ttlUntil > 0 ? $ttlUntil : 1;
@@ -423,26 +424,26 @@ final class MultiTierCache implements CacheInterface
                 'v' => $val,
                 'sn' => $this->serializer->name()
             ]);
-            
+
             $flag = chr(self::FLAG_NONE);
             $data = $tuple;
             $compName = $this->compressor->name();
-            
-            if ($compName === 'gzip') { 
-                $flag = chr(self::FLAG_GZIP); 
-                $data = $this->compressor->compress($tuple); 
-            } elseif ($compName === 'zstd') { 
-                $flag = chr(self::FLAG_ZSTD); 
-                $data = $this->compressor->compress($tuple); 
+
+            if ($compName === 'gzip') {
+                $flag = chr(self::FLAG_GZIP);
+                $data = $this->compressor->compress($tuple);
+            } elseif ($compName === 'zstd') {
+                $flag = chr(self::FLAG_ZSTD);
+                $data = $this->compressor->compress($tuple);
             }
-            
+
             $sn = $this->serializer->name();
             $snlen = strlen($sn);
-            
-            if ($snlen > 255) { 
-                throw new \RuntimeException('Serializer name too long (max 255 chars)'); 
+
+            if ($snlen > 255) {
+                throw new \RuntimeException('Serializer name too long (max 255 chars)');
             }
-            
+
             return self::MAGIC . $flag . chr($snlen) . $sn . $data;
         } catch (\Throwable $e) {
             throw new \RuntimeException("Failed to encode cache record: " . $e->getMessage(), 0, $e);
@@ -455,52 +456,52 @@ final class MultiTierCache implements CacheInterface
             if (strlen($raw) < 6) {
                 return null;
             }
-            
+
             $magic = substr($raw, 0, 4);
             if ($magic !== self::MAGIC) {
                 return null;
             }
-            
+
             $flagByte = ord($raw[4]);
             $snlen = ord($raw[5]);
             $offset = 6 + $snlen;
-            
+
             if (strlen($raw) < $offset) {
                 return null;
             }
-            
+
             $storedSerializer = substr($raw, 6, $snlen);
             $payload = substr($raw, $offset);
-            
+
             // Decompress if needed
             if ($flagByte === self::FLAG_GZIP || $flagByte === self::FLAG_ZSTD) {
-                try { 
-                    $payload = $this->compressor->decompress($payload); 
-                } catch (\Throwable $e) { 
+                try {
+                    $payload = $this->compressor->decompress($payload);
+                } catch (\Throwable $e) {
                     $this->log('warning', "Decompression failed: " . $e->getMessage());
-                    return null; 
+                    return null;
                 }
             }
-            
+
             // Unserialize metadata
             $arr = @unserialize($payload, ['allowed_classes' => true]);
             if (!is_array($arr) || !isset($arr['e'], $arr['v'], $arr['sn'])) {
                 return null;
             }
-            
+
             // Deserialize value with appropriate serializer
             if ($arr['sn'] !== $this->serializer->name()) {
                 $this->log('info', "Serializer mismatch: stored={$arr['sn']}, current={$this->serializer->name()}");
                 // Try to deserialize with current serializer anyway
             }
-            
+
             try {
                 $v = $this->serializer->deserialize($arr['v']);
             } catch (\Throwable $e) {
                 $this->log('warning', "Deserialization failed: " . $e->getMessage());
                 return null;
             }
-            
+
             return [
                 'e' => (int)$arr['e'],
                 'swr' => (int)($arr['swr'] ?? 0),
@@ -518,11 +519,11 @@ final class MultiTierCache implements CacheInterface
         if ($ttl === null) {
             return $this->defaultTtl;
         }
-        
+
         if ($ttl instanceof DateInterval) {
             return max(0, (int)(new \DateTimeImmutable())->add($ttl)->format('U') - time());
         }
-        
+
         return (int)$ttl;
     }
 
@@ -530,13 +531,13 @@ final class MultiTierCache implements CacheInterface
     {
         $hash = md5($key);
         $dir = $this->lockPath . '/' . substr($hash, 0, 2);
-        
-        if (!is_dir($dir)) { 
+
+        if (!is_dir($dir)) {
             if (!mkdir($dir, 0770, true) && !is_dir($dir)) {
                 error_log("Failed to create lock subdirectory: {$dir}");
             }
         }
-        
+
         return new Lock($dir . '/' . $hash . '.lock');
     }
 
