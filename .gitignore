@@ -1,8 +1,46 @@
+# Dependencies
 /vendor/
-/composer.lock
-/.phpunit.cache/
-/build/
-/cache/
-/coverage/
-.DS_Store
+composer.lock
+
+# IDE
 .idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+/coverage/
+.phpunit.result.cache
+phpunit.xml.dist
+
+# Output
+/output/
+/sitemaps/
+*.xml
+*.xml.gz
+
+# Logs
+*.log
+/logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Build
+/build/
+/dist/
+
+# Temporary files
+/tmp/
+*.tmp
+*.temp
+*.cache
