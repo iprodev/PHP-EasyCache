@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] - 2025-11-30
+
+### Fixed
+- 🐛 **Lock resource handling** - Fixed `TypeError` in `Lock::release()` when called multiple times (e.g., from `__destruct()` after manual release)
+- 🔧 **PHPUnit compatibility** - Downgraded PHPUnit from ^11.0 to ^10.0 for PHP 8.1 compatibility
+- 🔧 **PHPStan configuration** - Updated deprecated config options (`checkMissingIterableValueType`, `checkGenericClassInNonGenericObjectType`)
+- 🔧 **PHPStan type errors** - Fixed comparison type errors in `MultiTierCache::readThrough()` with explicit int casts
+- 🔧 **Code style violations** - Fixed PSR-12 violations (trailing whitespace, line length)
+
+### Changed
+- ♻️ **MultiTierCache** - Removed `final` keyword to allow extension by `EasyCache` wrapper class
+- 📝 **PHPUnit config** - Updated schema to 10.5, disabled `failOnWarning` to prevent CI failures from optional extension warnings
+- 📝 **PHPStan config** - Excluded `src/Laravel` folder (requires Laravel dependencies), added Predis ignore pattern for optional dependency
+
+---
+
 ## [3.0.1] - 2025-10-18
 
 ### Added
