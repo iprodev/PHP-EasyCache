@@ -7,6 +7,7 @@
 - [MultiTierCache](#multitiercache)
 - [CacheBuilder](#cachebuilder)
 - [TaggedCache](#taggedcache)
+- [آداپتور PSR-6](#آداپتور-psr-6)
 - [Storage Backends](#storage-backends)
 - [قفل‌ها (Locks)](#قفلها-locks)
 - [Serializers](#serializers)
@@ -248,6 +249,36 @@ public function forever(string $key, mixed $value): bool
 
 ---
 
+### ()increment و ()decrement
+
+```php
+public function increment(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+public function decrement(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+```
+
+به‌صورت اتمیک `$by` را اضافه (یا کم) می‌کند و مقدار جدید را برمی‌گرداند.
+
+- رکورد ناموجود یا منقضی از ۰ شروع می‌شود و با `$ttl` ساخته می‌شود (`null` = TTL پیش‌فرض، `<= 0` = بدون انقضا). رکورد موجود زمان انقضای خودش را نگه می‌دارد.
+- رشتهٔ عددی صحیح (`"41"`) پذیرفته می‌شود؛ هر مقدار دیگری باعث برگشت `false` می‌شود.
+- اگر قفل در مدت `lockTimeout` گرفته نشود `false` برمی‌گرداند.
+- اتمیک بودن از طریق lock provider است: در یک ماشین با `FileLockProvider` و بین سرورها با `RedisLockProvider`. رکوردها همچنان امضا می‌شوند و با `get()` خوانده می‌شوند.
+
+```php
+$attempts = $cache->increment('login.' . sha1($ip), 1, 60); // پنجرهٔ ۶۰ ثانیه‌ای
+```
+
+---
+
+### ()add
+
+```php
+public function add(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
+```
+
+مقدار را فقط وقتی ذخیره می‌کند که کلید رکورد تازه‌ای نداشته باشد (اتمیک، مثل `increment()`). `$ttl`: `null` = TTL پیش‌فرض، `<= 0` = بدون انقضا. اگر مقدار ذخیره شود `true` برمی‌گرداند.
+
+---
+
 ### ()tags و ()invalidateTags
 
 ```php
@@ -316,7 +347,23 @@ $cache = MultiTierCache::builder()
 
 ## TaggedCache
 
-نمای PSR-16 که `MultiTierCache::tags()` برمی‌گرداند. متدهای `get`، `set`، `delete`، `has`، `getMultiple`، `setMultiple`، `deleteMultiple`، `getOrSetSWR`، `remember` و `forever` را دارد. `clear()` روی این نما tagهای آن را باطل می‌کند. رکوردها باید با همان مجموعه tagی خوانده شوند که با آن نوشته شده‌اند (ترتیب مهم نیست). طول کلید حداکثر ۲۱۷ بایت است.
+نمای PSR-16 که `MultiTierCache::tags()` برمی‌گرداند. متدهای `get`، `set`، `delete`، `has`، `getMultiple`، `setMultiple`، `deleteMultiple`، `getOrSetSWR`، `remember`، `forever`، `increment`، `decrement` و `add` را دارد. نسخهٔ tagها در هر عملیات فقط یک بار خوانده می‌شود (برای متدهای `*Multiple()` هم). `clear()` روی این نما tagهای آن را باطل می‌کند. رکوردها باید با همان مجموعه tagی خوانده شوند که با آن نوشته شده‌اند (ترتیب مهم نیست). طول کلید حداکثر ۲۱۷ بایت است.
+
+---
+
+## آداپتور PSR-6
+
+کلاس `Iprodev\EasyCache\Psr6\CacheItemPool` رابط `Psr\Cache\CacheItemPoolInterface` را روی یک `MultiTierCache` پیاده می‌کند (به `psr/cache` نسخهٔ ۳ نیاز دارد).
+
+```php
+public function __construct(MultiTierCache $cache, ?ClockInterface $clock = null)
+```
+
+- اگر به کش clock داده‌اید، همان را به pool هم بدهید تا زمان انقضا یکسان محاسبه شود.
+- `getItem()`، `getItems()`، `hasItem()`، `save()`، `deleteItem(s)()` و `clear()` مستقیماً روی کش اجرا می‌شوند.
+- `CacheItem::expiresAfter()` و `expiresAt()` زمان انقضا را تعیین می‌کنند؛ بدون آن‌ها TTL پیش‌فرض کش استفاده می‌شود. ذخیرهٔ آیتمی که از قبل منقضی شده کلید را حذف می‌کند.
+- آیتم‌های `saveDeferred()` فوراً در `getItem()` دیده می‌شوند و با `commit()` (یک `setMultiple()` برای هر زمان انقضا) نوشته می‌شوند؛ حداکثر هنگام از بین رفتن pool.
+- کلید نامعتبر `Iprodev\EasyCache\Psr6\InvalidArgument` (یک `Psr\Cache\InvalidArgumentException`) پرتاب می‌کند.
 
 ---
 
@@ -640,6 +687,17 @@ EasyCache::remember('stats', 300, fn () => $this->computeStats());
 ```
 
 Facade همهٔ متدهای عمومی `MultiTierCache` را در اختیار می‌گذارد.
+
+### درایور cache store
+
+Service provider یک درایور `easycache` و store متناظر `cache.stores.easycache` را ثبت می‌کند (مگر اینکه خودتان تعریفش کرده باشید)، پس `Cache::store('easycache')` بدون تنظیمات کار می‌کند. برای پیش‌فرض کردنش `CACHE_STORE=easycache` بگذارید.
+
+کلاس `Iprodev\EasyCache\Laravel\EasyCacheStore` رابط‌های `Store` (از طریق `TaggableStore`) و `LockProvider` لاراول را پیاده می‌کند:
+
+- `get`، `many`، `put`، `putMany`، `add` (اتمیک)، `increment`/`decrement` (اتمیک؛ شمارنده‌های جدید منقضی نمی‌شوند)، `forever`، `touch`، `forget`، `flush`
+- tagهای لاراول (`Cache::store('easycache')->tags([...])`)
+- قفل‌های اتمیک (`Cache::store('easycache')->lock($name, $seconds)`) بر پایهٔ `add()`
+- کلیدها: پیشوند store (گزینهٔ `prefix`، پیش‌فرض `cache.prefix`) اضافه می‌شود؛ کاراکترهایی که در کلید EasyCache مجاز نیستند و `%` به‌صورت percent-encoding (یک‌به‌یک) کد می‌شوند و کلیدهای بلندتر از ۲۵۵ بایت hash می‌شوند
 
 ### دستورات Artisan
 

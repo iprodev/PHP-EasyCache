@@ -523,16 +523,10 @@ class RateLimiter
 
     public function hit(string $key): int
     {
-        $attempts = $this->cache->get($key, 0);
-        $attempts++;
-        
-        $this->cache->set(
-            $key,
-            $attempts,
-            $this->decayMinutes * 60
-        );
+        // increment() اتمیک است؛ پنجرهٔ زمانی با اولین درخواست شروع می‌شود
+        $attempts = $this->cache->increment($key, 1, $this->decayMinutes * 60);
 
-        return $attempts;
+        return $attempts === false ? PHP_INT_MAX : $attempts;
     }
 
     public function remaining(string $key): int
@@ -559,7 +553,7 @@ $limiter->hit($key);
 // ادامه درخواست...
 ```
 
-> ⚠️ این مثال اتمیک نیست (get و set جدا هستند) و برای محدودیت تقریبی مناسب است. برای محدودیت دقیق از `INCR` در Redis استفاده کنید.
+> برای شمارش اتمیک از `$cache->increment($key, 1, $ttl)` استفاده کنید: با قفل فایلی در یک سرور و با `RedisLockProvider` بین چند سرور اتمیک است.
 
 ### Session Management
 

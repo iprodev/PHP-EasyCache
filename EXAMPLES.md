@@ -404,16 +404,11 @@ class RateLimiter
 
     public function attempt(string $key, int $maxAttempts, int $decay): bool
     {
-        // Hash the identifier: IPv6 addresses contain ':' which is not allowed in keys
-        $cacheKey = 'rate_limit_' . sha1($key);
-        $attempts = $this->cache->get($cacheKey) ?? 0;
+        // Hash the identifier: IPv6 addresses contain ':' which is not allowed in keys.
+        // increment() is atomic; the window starts with the first hit and is not extended.
+        $attempts = $this->cache->increment('rate_limit_' . sha1($key), 1, $decay);
 
-        if ($attempts >= $maxAttempts) {
-            return false;
-        }
-
-        $this->cache->set($cacheKey, $attempts + 1, $decay);
-        return true;
+        return $attempts !== false && $attempts <= $maxAttempts;
     }
 
     public function remaining(string $key, int $maxAttempts): int
@@ -441,8 +436,8 @@ if (!$limiter->attempt($ip, 100, 3600)) {
 // Process request...
 ```
 
-> ⚠️ `get()` + `set()` is not atomic, so this limiter is approximate under
-> heavy concurrency. Use Redis `INCR`/`EXPIRE` directly when limits must be exact.
+`increment()` is atomic through the cache's lock provider: per machine with
+file locks, across servers with `RedisLockProvider`.
 
 ### API Token Rate Limiting
 

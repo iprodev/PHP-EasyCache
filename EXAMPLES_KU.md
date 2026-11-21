@@ -523,16 +523,10 @@ class RateLimiter
 
     public function hit(string $key): int
     {
-        $attempts = $this->cache->get($key, 0);
-        $attempts++;
-        
-        $this->cache->set(
-            $key,
-            $attempts,
-            $this->decayMinutes * 60
-        );
+        // increment() ئەتۆمییە؛ پەنجەرەی کات بە یەکەم داواکاری دەست پێدەکات
+        $attempts = $this->cache->increment($key, 1, $this->decayMinutes * 60);
 
-        return $attempts;
+        return $attempts === false ? PHP_INT_MAX : $attempts;
     }
 
     public function remaining(string $key): int
@@ -559,7 +553,7 @@ $limiter->hit($key);
 // بەردەوامبوونی داواکاری...
 ```
 
-> ⚠️ ئەم نموونەیە ئەتۆمی نییە (get و set جیان) و بۆ سنووری نزیکەیی گونجاوە. بۆ سنووری ورد `INCR` ی Redis بەکاربهێنە.
+> بۆ ژماردنی ئەتۆمی `$cache->increment($key, 1, $ttl)` بەکاربهێنە: بە قفڵی فایل لە یەک ڕاژەکاردا و بە `RedisLockProvider` لە نێوان چەند ڕاژەکاردا ئەتۆمییە.
 
 ### Session Management
 

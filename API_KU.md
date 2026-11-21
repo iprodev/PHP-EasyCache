@@ -7,6 +7,7 @@
 - [MultiTierCache](#multitiercache)
 - [CacheBuilder](#cachebuilder)
 - [TaggedCache](#taggedcache)
+- [ئەداپتەری PSR-6](#ئەداپتەری-psr-6)
 - [Storage Backends](#storage-backends)
 - [قفڵەکان (Locks)](#قفڵەکان-locks)
 - [Serializers](#serializers)
@@ -248,6 +249,36 @@ public function forever(string $key, mixed $value): bool
 
 ---
 
+### ()increment و ()decrement
+
+```php
+public function increment(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+public function decrement(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+```
+
+بە شێوەی ئەتۆمی `$by` زیاد (یان کەم) دەکات و بەها نوێیەکە دەگەڕێنێتەوە.
+
+- تۆماری نەبوو یان بەسەرچوو لە 0 دەست پێدەکات و بە `$ttl` دروست دەکرێت (`null` = TTL ی بنەڕەت، `<= 0` = بەبێ بەسەرچوون). تۆماری هەبوو کاتی بەسەرچوونی خۆی دەپارێزێت.
+- string ی ژمارەی تەواو (`"41"`) وەردەگیرێت؛ هەر بەهایەکی تر دەبێتە هۆی گەڕانەوەی `false`.
+- ئەگەر قفڵ لە ماوەی `lockTimeout` دا وەرنەگیرێت `false` دەگەڕێنێتەوە.
+- ئەتۆمیبوون لە ڕێگەی lock provider ە: لە یەک ئامێردا بە `FileLockProvider` و لە نێوان ڕاژەکارەکاندا بە `RedisLockProvider`. تۆمارەکان هەر واژۆ دەکرێن و بە `get()` دەخوێندرێنەوە.
+
+```php
+$attempts = $cache->increment('login.' . sha1($ip), 1, 60); // پەنجەرەی 60 چرکە
+```
+
+---
+
+### ()add
+
+```php
+public function add(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
+```
+
+بەها تەنها کاتێک هەڵدەگرێت کە کلیلەکە تۆمارێکی تازەی نەبێت (ئەتۆمی، وەک `increment()`). `$ttl`: `null` = TTL ی بنەڕەت، `<= 0` = بەبێ بەسەرچوون. ئەگەر بەها هەڵگیرا `true` دەگەڕێنێتەوە.
+
+---
+
 ### ()tags و ()invalidateTags
 
 ```php
@@ -316,7 +347,23 @@ $cache = MultiTierCache::builder()
 
 ## TaggedCache
 
-دیمەنێکی PSR-16 کە `MultiTierCache::tags()` دەیگەڕێنێتەوە. میتۆدەکانی `get`، `set`، `delete`، `has`، `getMultiple`، `setMultiple`، `deleteMultiple`، `getOrSetSWR`، `remember` و `forever` ی هەیە. `clear()` لەسەر ئەم دیمەنە tag ەکانی بەتاڵ دەکاتەوە. تۆمارەکان دەبێت بە هەمان کۆمەڵە tag بخوێندرێنەوە کە پێی نووسراون (ڕیزبەندی گرنگ نییە). درێژی کلیل زۆرترین 217 بایتە.
+دیمەنێکی PSR-16 کە `MultiTierCache::tags()` دەیگەڕێنێتەوە. میتۆدەکانی `get`، `set`، `delete`، `has`، `getMultiple`، `setMultiple`، `deleteMultiple`، `getOrSetSWR`، `remember`، `forever`، `increment`، `decrement` و `add` ی هەیە. وەشانی tag ەکان لە هەر کردارێکدا تەنها یەک جار دەخوێندرێتەوە (بۆ میتۆدەکانی `*Multiple()` یش). `clear()` لەسەر ئەم دیمەنە tag ەکانی بەتاڵ دەکاتەوە. تۆمارەکان دەبێت بە هەمان کۆمەڵە tag بخوێندرێنەوە کە پێی نووسراون (ڕیزبەندی گرنگ نییە). درێژی کلیل زۆرترین 217 بایتە.
+
+---
+
+## ئەداپتەری PSR-6
+
+پۆلی `Iprodev\EasyCache\Psr6\CacheItemPool` ڕووکاری `Psr\Cache\CacheItemPoolInterface` لەسەر `MultiTierCache` جێبەجێ دەکات (پێویستی بە `psr/cache` ی وەشانی 3 هەیە).
+
+```php
+public function __construct(MultiTierCache $cache, ?ClockInterface $clock = null)
+```
+
+- ئەگەر clock ت بە cache داوە، هەمان clock بدە بە pool یش تاکو کاتی بەسەرچوون بە یەک شێوە هەژمار بکرێت.
+- `getItem()`، `getItems()`، `hasItem()`، `save()`، `deleteItem(s)()` و `clear()` ڕاستەوخۆ لەسەر cache جێبەجێ دەکرێن.
+- `CacheItem::expiresAfter()` و `expiresAt()` کاتی بەسەرچوون دیاری دەکەن؛ بەبێ ئەوان TTL ی بنەڕەتی cache بەکاردێت. هەڵگرتنی بڕگەیەک کە پێشتر بەسەرچووە کلیلەکە دەسڕێتەوە.
+- بڕگەکانی `saveDeferred()` دەستبەجێ لە `getItem()` دا دەردەکەون و بە `commit()` (یەک `setMultiple()` بۆ هەر کاتێکی بەسەرچوون) دەنووسرێن؛ لە دواترین کاتدا کاتێک pool لەناو دەچێت.
+- کلیلی نادروست `Iprodev\EasyCache\Psr6\InvalidArgument` (یەک `Psr\Cache\InvalidArgumentException`) فڕێدەدات.
 
 ---
 
@@ -640,6 +687,17 @@ EasyCache::remember('stats', 300, fn () => $this->computeStats());
 ```
 
 Facade هەموو میتۆدە گشتییەکانی `MultiTierCache` پێشکەش دەکات.
+
+### درایڤەری cache store
+
+Service provider درایڤەرێکی `easycache` و store ی هاوتای `cache.stores.easycache` تۆمار دەکات (مەگەر خۆت پێناسەت کردبێت)، بۆیە `Cache::store('easycache')` بەبێ ڕێکخستن کار دەکات. بۆ کردنی بە بنەڕەت `CACHE_STORE=easycache` دابنێ.
+
+پۆلی `Iprodev\EasyCache\Laravel\EasyCacheStore` ڕووکارەکانی `Store` (لە ڕێگەی `TaggableStore`) و `LockProvider` ی Laravel جێبەجێ دەکات:
+
+- `get`، `many`، `put`، `putMany`، `add` (ئەتۆمی)، `increment`/`decrement` (ئەتۆمی؛ ژمێرەرە نوێکان بەسەرناچن)، `forever`، `touch`، `forget`، `flush`
+- tag ەکانی Laravel (`Cache::store('easycache')->tags([...])`)
+- قفڵی ئەتۆمی (`Cache::store('easycache')->lock($name, $seconds)`) لەسەر بنەمای `add()`
+- کلیلەکان: پێشگری store (هەڵبژاردەی `prefix`، بنەڕەت `cache.prefix`) زیاد دەکرێت؛ ئەو پیتانەی لە کلیلی EasyCache دا ڕێگەپێنەدراون و `%` بە percent-encoding (یەک‌بەیەک) کۆد دەکرێن و کلیلی درێژتر لە 255 بایت hash دەکرێن
 
 ### فەرمانەکانی Artisan
 

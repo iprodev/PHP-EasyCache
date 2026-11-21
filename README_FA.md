@@ -9,6 +9,8 @@
 - 🔧 **Serializer و Compressor قابل تعویض** (PHP/JSON + هیچ/Gzip/Zstd یا پیاده‌سازی خودتان)
 - 🔄 **Backfill خودکار** بین لایه‌ها
 - 📦 **عملیات دسته‌ای** (`MGET`، `IN (...)`، `apcu_fetch([...])`)، **tag**، `remember()`، `forever()` و آمار
+- 🔢 **شمارندهٔ اتمیک** (`increment()` و `decrement()`) و `add()`
+- 🧩 **آداپتور PSR-6** و **cache store لاراول** (`Cache::store('easycache')`، tag، قفل و rate limiting)
 - 🎯 یکپارچه‌سازی کامل با **Laravel**: Service Provider، Facade و دستورات artisan
 - ✅ تست‌شده روی File، SQLite، MySQL، PostgreSQL، Redis (phpredis و Predis) و APCu
 
@@ -162,7 +164,19 @@ $cache->invalidateTags('users');
 
 // شمارندهٔ hit/miss همین نمونه
 $cache->getStats(); // ['hits' => .., 'misses' => .., 'hit_ratio' => 0.93, ...]
+
+// شمارندهٔ اتمیک: شمارندهٔ جدید به اندازهٔ TTL داده‌شده زنده می‌ماند
+// (null = پیش‌فرض، 0 = همیشه) و افزایش‌های بعدی زمان انقضا را تغییر نمی‌دهند
+$attempts = $cache->increment('login-attempts.' . sha1($ip), 1, 60);
+$cache->decrement('stock.42');
+
+// ذخیره فقط اگر وجود نداشته باشد (اتمیک)
+if ($cache->add('job.42.started', time(), 300)) {
+    // این پروسه برنده شد
+}
 ```
+
+`increment()`، `decrement()` و `add()` از طریق lock provider اتمیک‌اند: قفل فایلی پروسه‌های یک ماشین را هماهنگ می‌کند و `RedisLockProvider` همهٔ سرورها را. اگر قفل در مدت lock timeout گرفته نشود (یا مقدار عدد صحیح نباشد) `false` برمی‌گردانند.
 
 ### 5. Serializer و Compressor قابل تعویض
 
@@ -329,11 +343,45 @@ $data = EasyCache::getOrSetSWR(
 );
 ```
 
+### Cache store لاراول
+
+Service provider یک درایور کش به نام `easycache` ثبت می‌کند، پس EasyCache با API خود لاراول، tagها، قفل‌های اتمیک و rate limiter کار می‌کند:
+
+```php
+Cache::store('easycache')->remember('users', 600, fn () => User::all());
+Cache::store('easycache')->tags(['users'])->flush();
+Cache::store('easycache')->lock('reports', 30)->get(fn () => $this->buildReports());
+```
+
+این store بدون تنظیمات در دسترس است. برای اینکه store پیش‌فرض باشد `CACHE_STORE=easycache` بگذارید. کلیدهای لاراول می‌توانند هر کاراکتری داشته باشند؛ کاراکترهایی که در کلید EasyCache مجاز نیستند کد می‌شوند.
+
 ### دستورات Artisan
 
 ```bash
 php artisan easycache:prune   # حذف رکوردهای منقضی
 php artisan easycache:clear   # حذف همهٔ رکوردها
+```
+
+---
+
+## 🧩 PSR-6
+
+برای کتابخانه‌هایی که pool از نوع PSR-6 می‌خواهند (`composer require psr/cache`):
+
+```php
+use Iprodev\EasyCache\Psr6\CacheItemPool;
+
+$pool = new CacheItemPool($cache);
+
+$item = $pool->getItem('user-42');
+if (!$item->isHit()) {
+    $item->set($repo->find(42))->expiresAfter(600);
+    $pool->save($item);
+}
+
+// ذخیره‌های deferred در یک دسته برای هر زمان انقضا نوشته می‌شوند
+$pool->saveDeferred($pool->getItem('a')->set(1));
+$pool->commit();
 ```
 
 ---

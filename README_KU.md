@@ -9,6 +9,8 @@
 - 🔧 **Serializer و Compressor گۆڕاو** (PHP/JSON + هیچ/Gzip/Zstd یان هی خۆت)
 - 🔄 **Backfill خۆکار** لە نێوان ڕیزەکان
 - 📦 **کارپێکردنی کۆمەڵ** (`MGET`، `IN (...)`، `apcu_fetch([...])`)، **tag**، `remember()`، `forever()` و ئامار
+- 🔢 **ژمێرەری ئەتۆمی** (`increment()` و `decrement()`) و `add()`
+- 🧩 **ئەداپتەری PSR-6** و **cache store ی Laravel** (`Cache::store('easycache')`، tag، قفڵ و rate limiting)
 - 🎯 یەکخستنی تەواو لەگەڵ **Laravel**: Service Provider، Facade و فەرمانەکانی artisan
 - ✅ تاقیکراوەتەوە لەسەر File، SQLite، MySQL، PostgreSQL، Redis (phpredis و Predis) و APCu
 
@@ -162,7 +164,19 @@ $cache->invalidateTags('users');
 
 // ژمێرەری hit/miss ی ئەم نموونەیە
 $cache->getStats(); // ['hits' => .., 'misses' => .., 'hit_ratio' => 0.93, ...]
+
+// ژمێرەری ئەتۆمی: ژمێرەری نوێ بە ئەندازەی TTL ی دراو دەمێنێتەوە
+// (null = بنەڕەت، 0 = هەمیشە) و زیادکردنەکانی دواتر کاتی بەسەرچوون ناگۆڕن
+$attempts = $cache->increment('login-attempts.' . sha1($ip), 1, 60);
+$cache->decrement('stock.42');
+
+// هەڵگرتن تەنها ئەگەر بوونی نەبێت (ئەتۆمی)
+if ($cache->add('job.42.started', time(), 300)) {
+    // ئەم پرۆسەیە بردییەوە
+}
 ```
+
+`increment()`، `decrement()` و `add()` لە ڕێگەی lock provider ەوە ئەتۆمین: قفڵی فایل پرۆسەکانی یەک ئامێر ڕێکدەخات و `RedisLockProvider` هەموو ڕاژەکارەکان. ئەگەر قفڵ لە ماوەی lock timeout دا وەرنەگیرێت (یان بەهاکە ژمارەی تەواو نەبێت) `false` دەگەڕێننەوە.
 
 ### 5. Serializer و Compressor گۆڕاو
 
@@ -329,11 +343,45 @@ $data = EasyCache::getOrSetSWR(
 );
 ```
 
+### Cache store ی Laravel
+
+Service provider درایڤەرێکی cache بە ناوی `easycache` تۆمار دەکات، بۆیە EasyCache لەگەڵ API ی خودی Laravel، tag ەکان، قفڵی ئەتۆمی و rate limiter کار دەکات:
+
+```php
+Cache::store('easycache')->remember('users', 600, fn () => User::all());
+Cache::store('easycache')->tags(['users'])->flush();
+Cache::store('easycache')->lock('reports', 30)->get(fn () => $this->buildReports());
+```
+
+ئەم store ە بەبێ ڕێکخستن بەردەستە. بۆ ئەوەی store ی بنەڕەت بێت `CACHE_STORE=easycache` دابنێ. کلیلەکانی Laravel دەتوانن هەر پیتێکیان تێدابێت؛ ئەو پیتانەی لە کلیلی EasyCache دا ڕێگەپێنەدراون کۆد دەکرێن.
+
 ### فەرمانەکانی Artisan
 
 ```bash
 php artisan easycache:prune   # سڕینەوەی تۆمارە بەسەرچووەکان
 php artisan easycache:clear   # سڕینەوەی هەموو تۆمارەکان
+```
+
+---
+
+## 🧩 PSR-6
+
+بۆ ئەو کتێبخانانەی pool ی PSR-6 یان دەوێت (`composer require psr/cache`):
+
+```php
+use Iprodev\EasyCache\Psr6\CacheItemPool;
+
+$pool = new CacheItemPool($cache);
+
+$item = $pool->getItem('user-42');
+if (!$item->isHit()) {
+    $item->set($repo->find(42))->expiresAfter(600);
+    $pool->save($item);
+}
+
+// هەڵگرتنە deferred ەکان بە یەک کۆمەڵ بۆ هەر کاتێکی بەسەرچوون دەنووسرێن
+$pool->saveDeferred($pool->getItem('a')->set(1));
+$pool->commit();
 ```
 
 ---

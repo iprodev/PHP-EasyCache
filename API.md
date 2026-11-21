@@ -7,6 +7,7 @@ Complete API documentation for PHP EasyCache v4.0.
 - [MultiTierCache](#multitiercache)
 - [CacheBuilder](#cachebuilder)
 - [TaggedCache](#taggedcache)
+- [PSR-6 Adapter](#psr-6-adapter)
 - [Storage Backends](#storage-backends)
 - [Locks](#locks)
 - [Serializers](#serializers)
@@ -269,6 +270,41 @@ Stores a value without expiry.
 
 ---
 
+### increment() / decrement()
+
+```php
+public function increment(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+public function decrement(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+```
+
+Atomically add (or subtract) `$by` and return the new value.
+
+- A missing or expired entry starts at 0 and is created with `$ttl`
+  (`null` = default TTL, `<= 0` = no expiry). An existing entry keeps its expiry.
+- Integer strings (`"41"`) are accepted; any other value makes the call return `false`.
+- Returns `false` if the lock cannot be acquired within `lockTimeout`.
+- Atomic through the lock provider: per machine with `FileLockProvider`,
+  across servers with `RedisLockProvider`. Entries stay signed and are
+  readable with `get()`.
+
+```php
+$attempts = $cache->increment('login.' . sha1($ip), 1, 60); // 60 s window
+```
+
+---
+
+### add()
+
+```php
+public function add(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
+```
+
+Stores the value only if the key has no fresh entry (atomic, like
+`increment()`). `$ttl`: `null` = default TTL, `<= 0` = no expiry. Returns
+`true` when the value was stored.
+
+---
+
 ### tags() / invalidateTags()
 
 ```php
@@ -347,9 +383,31 @@ checks as the constructor.
 
 A PSR-16 view returned by `MultiTierCache::tags()`. It supports `get`, `set`,
 `delete`, `has`, `getMultiple`, `setMultiple`, `deleteMultiple`,
-`getOrSetSWR`, `remember` and `forever`. `clear()` invalidates the view's tags.
+`getOrSetSWR`, `remember`, `forever`, `increment`, `decrement` and `add`.
+The tag versions are read once per operation (also for the `*Multiple()`
+methods). `clear()` invalidates the view's tags.
 Entries must be read with the same set of tags they were written with (the
 order does not matter). Keys may be up to 217 bytes.
+
+---
+
+## PSR-6 Adapter
+
+`Iprodev\EasyCache\Psr6\CacheItemPool` implements `Psr\Cache\CacheItemPoolInterface`
+on top of a `MultiTierCache` (requires `psr/cache` ^3).
+
+```php
+public function __construct(MultiTierCache $cache, ?ClockInterface $clock = null)
+```
+
+- Pass the cache's clock if you gave it one, so expiries are computed the same way.
+- `getItem()`, `getItems()`, `hasItem()`, `save()`, `deleteItem(s)()` and `clear()` map to the cache.
+- `CacheItem::expiresAfter()` / `expiresAt()` set the TTL; without one the cache's default TTL is used.
+  Saving an already expired item deletes the key.
+- `saveDeferred()` items are visible to `getItem()` immediately and written by
+  `commit()` (one `setMultiple()` per expiry), at the latest when the pool is destroyed.
+- Invalid keys throw `Iprodev\EasyCache\Psr6\InvalidArgument`
+  (a `Psr\Cache\InvalidArgumentException`).
 
 ---
 
@@ -689,6 +747,24 @@ EasyCache::remember('stats', 300, fn () => $this->computeStats());
 ```
 
 The facade exposes every public `MultiTierCache` method.
+
+### Cache store driver
+
+The provider registers an `easycache` driver and a matching
+`cache.stores.easycache` store (unless you define one yourself), so
+`Cache::store('easycache')` works out of the box; set `CACHE_STORE=easycache`
+to make it the default.
+
+`Iprodev\EasyCache\Laravel\EasyCacheStore` implements Laravel's `Store`
+(`TaggableStore`) and `LockProvider`:
+
+- `get`, `many`, `put`, `putMany`, `add` (atomic), `increment`/`decrement`
+  (atomic; new counters do not expire), `forever`, `touch`, `forget`, `flush`
+- Laravel tags (`Cache::store('easycache')->tags([...])`)
+- Atomic locks (`Cache::store('easycache')->lock($name, $seconds)`), based on `add()`
+- Keys: the store prefix (`prefix` option, default `cache.prefix`) is
+  prepended; characters that EasyCache keys do not allow, and `%`, are
+  percent-encoded (one-to-one); keys longer than 255 bytes are hashed
 
 ### Artisan commands
 

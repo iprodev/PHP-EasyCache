@@ -25,6 +25,12 @@ readable. See [MIGRATION.md](MIGRATION.md) for the upgrade steps.
 - ✨ `MultiTierCache::builder()` fluent builder (`CacheBuilder`).
 - ✨ `RefreshMode` enum.
 - ✨ `PrunableStorageInterface`.
+- ✨ Atomic `increment()`, `decrement()` and `add()` on `MultiTierCache` and `TaggedCache`. They are atomic through the lock provider (per machine with file locks, across servers with `RedisLockProvider`); entries stay signed and readable with `get()`.
+- ✨ Laravel cache store driver `easycache` (`Cache::store('easycache')`), registered automatically, with Laravel tags, atomic locks (`Cache::lock()`), `increment`/`decrement`/`add` (rate limiter) and one-to-one encoding of Laravel keys.
+- ✨ PSR-6 adapter `Psr6\CacheItemPool` with deferred saves committed in one batch per expiry (requires `psr/cache`).
+
+### Changed
+- ⚡ `TaggedCache` reads the tag versions once per operation (also for `getMultiple()`/`setMultiple()`/`deleteMultiple()`) and creates missing versions atomically.
 
 ### Internal
 - ♻️ Typed phpredis and Predis adapters replace untyped client calls; PHPStan runs at level max.

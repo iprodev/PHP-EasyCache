@@ -9,6 +9,8 @@
 - 🔧 **Pluggable Serializer & Compressor** (PHP/JSON + None/Gzip/Zstd or your own)
 - 🔄 Automatic **backfill** between tiers (e.g., a Redis hit is written back to APCu)
 - 📦 **Batch operations** (`MGET`, `IN (...)`, `apcu_fetch([...])`), **tags**, `remember()`, `forever()`, stats
+- 🔢 **Atomic counters** (`increment()`, `decrement()`) and `add()`
+- 🧩 **PSR‑6 adapter** and a **Laravel cache store** (`Cache::store('easycache')`, tags, locks, rate limiting)
 - 🎯 First‑class **Laravel** integration: Service Provider, Facade and artisan commands
 - ✅ Tested against File, SQLite, MySQL, PostgreSQL, Redis (phpredis + Predis) and APCu
 
@@ -176,7 +178,22 @@ $cache->invalidateTags('users');
 
 // Hit/miss counters of this instance
 $cache->getStats(); // ['hits' => .., 'misses' => .., 'hit_ratio' => 0.93, ...]
+
+// Atomic counters: a new counter lives for the given TTL (null = default, 0 = forever),
+// later increments keep its expiry
+$attempts = $cache->increment('login-attempts.' . sha1($ip), 1, 60);
+$cache->decrement('stock.42');
+
+// Store only if missing (atomic)
+if ($cache->add('job.42.started', time(), 300)) {
+    // this process won
+}
 ```
+
+`increment()`, `decrement()` and `add()` are atomic through the lock provider:
+file locks serialize the processes of one machine, `RedisLockProvider` all
+servers. They return `false` if the lock cannot be acquired within the lock
+timeout (or the value is not an integer).
 
 ### 5. Pluggable Serialization
 
@@ -521,6 +538,23 @@ EasyCache::setMultiple([
 ]);
 ```
 
+### Laravel Cache Store
+
+The provider registers an `easycache` cache driver, so EasyCache works with
+Laravel's own cache API, tags, atomic locks and the rate limiter:
+
+```php
+Cache::store('easycache')->remember('users', 600, fn () => User::all());
+Cache::store('easycache')->tags(['users'])->flush();
+Cache::store('easycache')->lock('reports', 30)->get(fn () => $this->buildReports());
+RateLimiter::for('api', fn () => Limit::perMinute(60)); // with CACHE_STORE=easycache
+```
+
+The store is available without configuration. To make it the default store,
+set `CACHE_STORE=easycache` (or add `'easycache' => ['driver' => 'easycache']`
+to `config/cache.php` with your own `prefix`). Laravel keys may contain any
+character: characters that EasyCache keys do not allow are encoded.
+
 ### Artisan Commands
 
 ```bash
@@ -731,6 +765,27 @@ $cache = MultiTierCache::builder()
     ->lockProvider(new RedisLockProvider($redis))
     ->logger($logger)
     ->build();
+```
+
+## 🧩 PSR‑6
+
+For libraries that expect a PSR‑6 pool (`composer require psr/cache`):
+
+```php
+use Iprodev\EasyCache\Psr6\CacheItemPool;
+
+$pool = new CacheItemPool($cache);
+
+$item = $pool->getItem('user-42');
+if (!$item->isHit()) {
+    $item->set($repo->find(42))->expiresAfter(600);
+    $pool->save($item);
+}
+
+// Deferred saves are written in one batch per expiry
+$pool->saveDeferred($pool->getItem('a')->set(1));
+$pool->saveDeferred($pool->getItem('b')->set(2));
+$pool->commit();
 ```
 
 ## 🔄 Upgrading
