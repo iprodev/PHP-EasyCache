@@ -27,9 +27,10 @@ use Iprodev\EasyCache\Serialization\NativeSerializer;
 use Iprodev\EasyCache\Compression\NullCompressor;
 
 $cache = new MultiTierCache(
-    [new FileStorage('/tmp/cache')],
-    new NativeSerializer(),
-    new NullCompressor()
+    [new FileStorage('/var/cache/myapp')],
+    new NativeSerializer([stdClass::class]),     // classes that may be cached as objects
+    new NullCompressor(),
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],  // required when objects are allowed
 );
 
 // Store a string
@@ -89,7 +90,7 @@ class WeatherService
             ttl: 300,                    // Fresh for 5 minutes
             swrSeconds: 60,              // Serve stale for 1 minute while refreshing
             staleIfErrorSeconds: 3600,   // If API is down, serve stale for 1 hour
-            options: ['mode' => 'defer'] // Refresh after response
+            mode: RefreshMode::Defer // Refresh after response
         );
     }
 }

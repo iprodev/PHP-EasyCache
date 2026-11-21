@@ -78,7 +78,7 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ### Prerequisites
 
-- PHP 8.1 or higher
+- PHP 8.3 or higher
 - Composer
 - Git
 
@@ -443,9 +443,9 @@ $this->cache = new MultiTierCache(
 
 ```bash
 # Using Docker
-docker run --rm -v $(pwd):/app -w /app php:8.1-cli composer test
-docker run --rm -v $(pwd):/app -w /app php:8.2-cli composer test
 docker run --rm -v $(pwd):/app -w /app php:8.3-cli composer test
+docker run --rm -v $(pwd):/app -w /app php:8.4-cli composer test
+docker run --rm -v $(pwd):/app -w /app php:8.5-cli composer test
 ```
 
 ### Performance Testing
@@ -464,15 +464,19 @@ $this->assertLessThan(0.01, $elapsed, 'Set operation too slow');
 
 ### Adding a New Storage Backend
 
-1. **Implement `StorageInterface`:**
+1. **Implement `StorageInterface`** (and `PrunableStorageInterface` if the
+   backend does not expire entries on its own):
 ```php
-final class MyStorage implements StorageInterface
+final class MyStorage implements PrunableStorageInterface
 {
     public function get(string $key): ?string { }
     public function set(string $key, string $payload, int $ttl): bool { }
     public function delete(string $key): bool { }
     public function has(string $key): bool { }
     public function clear(): bool { }
+    public function getMany(array $keys): array { }
+    public function setMany(array $payloads, int $ttl): bool { }
+    public function deleteMany(array $keys): bool { }
     public function prune(): int { }
 }
 ```

@@ -261,7 +261,7 @@ $data = $cache->getOrSetSWR(
     'key',
     fn() => expensiveCall(),  // 50ms
     300, 60, 300,
-    ['mode' => 'sync']
+    RefreshMode::Sync
 );
 
 // Defer mode: ~1ms for everyone (serves stale, refreshes after the response)
@@ -269,7 +269,7 @@ $data = $cache->getOrSetSWR(
     'key',
     fn() => expensiveCall(),  // Runs after response
     300, 60, 300,
-    ['mode' => 'defer']  // Needs fastcgi_finish_request() (PHP-FPM) or LiteSpeed, otherwise falls back to sync
+    RefreshMode::Defer  // Needs fastcgi_finish_request() (PHP-FPM) or LiteSpeed, otherwise falls back to sync
 );
 ```
 
@@ -451,7 +451,7 @@ $data = $cache->getOrSetSWR(
     'api_data',
     fn() => $db->query("EXPENSIVE QUERY")->fetchAll(),
     300, 60, 1800,
-    ['mode' => 'defer']
+    RefreshMode::Defer
 );
 // First request: 250ms
 // Cached requests: 0.01ms (99.996% faster)

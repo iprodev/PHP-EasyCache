@@ -1,19 +1,19 @@
-# PHP EasyCache v3 — PSR‑16 Multi‑Backend Cache with SWR
+# PHP EasyCache v4 — PSR‑16 Multi‑Backend Cache with SWR
 
 **EasyCache** is a pragmatic, batteries‑included cache library that implements the **PSR‑16 Simple Cache** interface and adds production‑grade features on top:
 
 - 🚀 Multi‑tier storage: **APCu, Redis, File, and PDO (MySQL/PostgreSQL/SQLite)**
 - 🔒 **Atomic writes** for file storage, **stampede protection** with per‑key locks (file or Redis)
 - ⚡ **Full SWR** (*stale‑while‑revalidate* + *stale‑if‑error*)
-- 🛡️ **Tamper‑proof entries**: optional HMAC‑SHA256 signing, no `unserialize()` of entry headers
+- 🛡️ **Secure by default**: no objects are unserialized unless you allow them, and then only from HMAC‑signed entries
 - 🔧 **Pluggable Serializer & Compressor** (PHP/JSON + None/Gzip/Zstd or your own)
 - 🔄 Automatic **backfill** between tiers (e.g., a Redis hit is written back to APCu)
 - 📦 **Batch operations** (`MGET`, `IN (...)`, `apcu_fetch([...])`), **tags**, `remember()`, `forever()`, stats
 - 🎯 First‑class **Laravel** integration: Service Provider, Facade and artisan commands
 - ✅ Tested against File, SQLite, MySQL, PostgreSQL, Redis (phpredis + Predis) and APCu
 
-> Version: **v3.1.0** — Requires **PHP 8.1+** and `psr/simple-cache` `^2 || ^3`.
-> Upgrading from 3.0? Read [MIGRATION.md](MIGRATION.md).
+> Version: **v4.0.0** (in development) — Requires **PHP 8.3+** and `psr/simple-cache` `^3`.
+> Upgrading from 3.x? Read [MIGRATION.md](MIGRATION.md).
 
 📖 **Documentation in other languages:**
 - [فارسی (Persian)](README_FA.md)
@@ -115,16 +115,18 @@ $result = $cache->getOrSetSWR(
     ttl: 300,                  // 5 minutes of fresh data
     swrSeconds: 120,           // Serve stale up to 2 minutes after expiry
     staleIfErrorSeconds: 600,  // If refresh fails, serve stale up to 10 minutes
-    options: ['mode' => 'defer'] // Defer refresh until after response
+    mode: RefreshMode::Defer   // Refresh after the response is sent
 );
 ```
+
+`RefreshMode` is `Iprodev\EasyCache\Cache\RefreshMode`.
 
 **How it works:**
 1. **Fresh** entry → returned immediately.
 2. **Expired, within `swrSeconds`** → one process refreshes it, the others get the stale value without waiting.
-   - `mode: 'sync'` (default): the refreshing process returns the **new** value.
-   - `mode: 'defer'`: the stale value is returned and the refresh runs after the response is sent
-     (`fastcgi_finish_request()` / LiteSpeed; elsewhere it falls back to `sync`).
+   - `RefreshMode::Sync` (default): the refreshing process returns the **new** value.
+   - `RefreshMode::Defer`: the stale value is returned and the refresh runs after the response is sent
+     (`fastcgi_finish_request()` / LiteSpeed; elsewhere it falls back to `Sync`).
    - If the refresh fails, the stale value is served.
 3. **Expired, within `staleIfErrorSeconds` only** → the value is recomputed; the stale value is served
    **only if the producer throws**.
@@ -133,21 +135,30 @@ $result = $cache->getOrSetSWR(
 A `null` TTL uses the default TTL (`0` = never expire); a TTL `<= 0` computes the value without caching it.
 `null` results are cached like any other value.
 
-### 3. Security: Signed Entries
+### 3. Security: Safe Defaults and Signed Entries
 
 Anyone who can write to a cache backend (a Redis without password, a shared
-cache directory, a shared database table...) could otherwise plant entries.
-EasyCache never runs `unserialize()` on entry headers, and with a signing key
-every entry carries an HMAC‑SHA256 signature: unsigned or modified entries
-are rejected **before** they are deserialized.
+cache directory, a shared database table...) could otherwise plant entries,
+and unserializing a planted PHP object can execute code. EasyCache 4 is safe
+by default:
+
+- `NativeSerializer` caches scalars and arrays only. Objects of classes you
+  did not allow are rejected when written and ignored when read.
+- To cache objects, list their classes in `allowedClasses`. A serializer that
+  can create objects then **requires a signing key**: every entry carries an
+  HMAC‑SHA256 signature, and unsigned or modified entries are rejected
+  **before** they are deserialized.
 
 ```php
 $cache = new MultiTierCache(
     [$redisStore],
-    new NativeSerializer(allowedClasses: [UserDto::class]), // or false: no objects at all
+    new NativeSerializer(allowedClasses: [UserDto::class]), // true = any class
     signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],             // >= 16 random bytes
 );
 ```
+
+If nobody but your application can write to any tier, you may pass
+`allowUnsignedObjects: true` instead of a signing key.
 
 ### 4. More Helpers
 
@@ -172,9 +183,11 @@ $cache->getStats(); // ['hits' => .., 'misses' => .., 'hit_ratio' => 0.93, ...]
 Choose the serializer that fits your needs:
 
 ```php
-// PHP Native Serializer (supports objects; restrict the classes it may create)
+// PHP Native Serializer: scalars and arrays by default; objects only for listed
+// classes (or true for any class), together with a signing key
 use Iprodev\EasyCache\Serialization\NativeSerializer;
-$cache = new MultiTierCache([$storage], new NativeSerializer(allowedClasses: true));
+$cache = new MultiTierCache([$storage], new NativeSerializer());
+$cache = new MultiTierCache([$storage], new NativeSerializer([Money::class]), signingKey: $key);
 
 // JSON Serializer (portable, never creates objects; objects come back as arrays)
 use Iprodev\EasyCache\Serialization\JsonSerializer;
@@ -383,7 +396,7 @@ $posts = $cache->getOrSetSWR(
     ttl: 300,          // Fresh for 5 minutes
     swrSeconds: 60,    // Serve stale for 1 minute while refreshing
     staleIfErrorSeconds: 300, // Serve stale for 5 minutes if API fails
-    options: ['mode' => 'defer'] // Refresh after response sent
+    mode: RefreshMode::Defer // Refresh after response sent
 );
 ```
 
@@ -475,7 +488,9 @@ EASYCACHE_COMPRESSOR=gzip           # none|gzip|zstd
 ```
 
 - Entries are **signed** with a key derived from `APP_KEY` (set `EASYCACHE_SIGNING_KEY`
-  to use your own, `EASYCACHE_SIGN=false` to disable).
+  to use your own, `EASYCACHE_SIGN=false` to disable). With signing disabled, the php
+  serializer must not allow objects (`serializer.allowed_classes = false`) unless
+  `EASYCACHE_ALLOW_UNSIGNED_OBJECTS=true`.
 - Drivers that cannot be initialised (extension missing, Redis down...) are skipped with
   a warning in the log (`EASYCACHE_SKIP_UNAVAILABLE=false` to fail instead).
 - The cache is available as `app('easycache')`, the `EasyCache` facade, or by type-hinting
@@ -610,7 +625,7 @@ use Iprodev\EasyCache\Lock\FileLockProvider;
 use Iprodev\EasyCache\Lock\RedisLockProvider;
 
 // Custom lock directory
-$cache = new MultiTierCache([$storage], lockPath: '/var/lib/myapp/locks');
+$cache = new MultiTierCache([$storage], lockProvider: new FileLockProvider('/var/lib/myapp/locks'));
 
 // Distributed locks for several servers (SET NX PX + safe release)
 $cache = new MultiTierCache(
@@ -658,6 +673,7 @@ $storage = new FileStorage('/cache', '.cache', 3);
 | `EASYCACHE_SKIP_UNAVAILABLE` | `true` | Skip drivers that cannot be initialised |
 | `EASYCACHE_DEFAULT_TTL` | `600` | Default TTL in seconds (`0` = never expire) |
 | `EASYCACHE_SIGN` / `EASYCACHE_SIGNING_KEY` | `true` / derived from `APP_KEY` | Entry signing |
+| `EASYCACHE_ALLOW_UNSIGNED_OBJECTS` | `false` | Allow object caching with signing disabled (only if nobody else can write to the backends) |
 | `EASYCACHE_LOCK_DRIVER` | `file` | `file`, `redis` or `none` |
 | `EASYCACHE_LOCK_PATH` / `EASYCACHE_LOCK_TIMEOUT` | storage path / `30` | File lock directory, lock wait in seconds |
 | `EASYCACHE_APCU_PREFIX` / `EASYCACHE_APCU_MAX_TTL` | `ec:` / `60` | APCu prefix and TTL cap |
@@ -700,25 +716,27 @@ if (!$result) {
 
 ---
 
-## 🔄 Backwards Compatibility
+## 🏗️ Builder
 
-For projects upgrading from v2, use the BC wrapper:
+Instead of constructor arguments you can use the fluent builder:
 
 ```php
-use Iprodev\EasyCache\EasyCache;
-
-$cache = new EasyCache([
-    'cache_path' => '/var/cache/myapp',   // default: a private per-user dir in the system temp dir
-    'cache_extension' => '.cache',
-    'cache_time' => 3600,
-    'directory_shards' => 2,
-    'signing_key' => getenv('EASYCACHE_SIGNING_KEY') ?: null, // optional
-]);
-
-// Works like v2
-$cache->set('key', 'value');
-$value = $cache->get('key');
+$cache = MultiTierCache::builder()
+    ->tier(new ApcuStorage('app:', maxTtl: 60))
+    ->tier(new RedisStorage($redis, 'app:'))
+    ->serializer(new NativeSerializer([UserDto::class]))
+    ->signingKey($_ENV['EASYCACHE_SIGNING_KEY'])
+    ->compressor(new GzipCompressor(3))
+    ->defaultTtl(600)
+    ->lockProvider(new RedisLockProvider($redis))
+    ->logger($logger)
+    ->build();
 ```
+
+## 🔄 Upgrading
+
+See [MIGRATION.md](MIGRATION.md) for upgrading from 3.x (and older versions).
+The v2 compatibility wrapper `Iprodev\EasyCache\EasyCache` was removed in 4.0.
 
 ---
 

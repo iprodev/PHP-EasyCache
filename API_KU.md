@@ -1,10 +1,11 @@
 # سەرچاوەی API
 
-بەڵگەنامەی تەواوی API بۆ PHP EasyCache وەشانی 3.1.
+بەڵگەنامەی تەواوی API بۆ PHP EasyCache وەشانی 4.0.
 
 ## پێرستی ناوەڕۆک
 
 - [MultiTierCache](#multitiercache)
+- [CacheBuilder](#cachebuilder)
 - [TaggedCache](#taggedcache)
 - [Storage Backends](#storage-backends)
 - [قفڵەکان (Locks)](#قفڵەکان-locks)
@@ -31,28 +32,30 @@ public function __construct(
     ?CompressorInterface $compressor = null,
     int $defaultTtl = 3600,
     ?LoggerInterface $logger = null,
-    ?string $lockPath = null,
     ?ClockInterface $clock = null,
     ?string $signingKey = null,
     ?LockProviderInterface $lockProvider = null,
-    float $lockTimeout = 30.0
+    float $lockTimeout = 30.0,
+    bool $allowUnsignedObjects = false
 )
 ```
 
+`MultiTierCache` پۆلێکی `final` ە. ئارگیومێنتەکانی دوای `$logger` بە ناو (named arguments) بدە یان [`MultiTierCache::builder()`](#cachebuilder) بەکاربهێنە.
+
 **پارامەترەکان:**
 - `$tiers` (StorageInterface[]): چینەکانی هەڵگرتن، ڕیزکراو لە خێراترینەوە بۆ خاوترین
-- `$serializer`: بنەڕەت `NativeSerializer`
+- `$serializer`: بنەڕەت `NativeSerializer` بەبێ پشتگیری ئۆبجێکت
 - `$compressor`: بنەڕەت `NullCompressor`
 - `$defaultTtl` (int): TTL ی بنەڕەت بە چرکە کاتێک TTL نەدرابێت. `0` واتە هەرگیز بەسەرناچێت (بنەڕەت: 3600)
 - `$logger`: logger ی PSR-3. هەروەها دەدرێت بە هەر چینێک کە `LoggerAwareInterface` جێبەجێ دەکات و هێشتا logger ی نییە
-- `$lockPath` (string|null): بوخچەی فایلەکانی قفڵ (بنەڕەت: بوخچەیەکی تایبەتی بەکارهێنەر لە temp ی سیستەم). ئەگەر `$lockProvider` درابێت پشتگوێ دەخرێت
 - `$clock` (`Psr\Clock\ClockInterface`): سەرچاوەی کات (بنەڕەت: `SystemClock`)
 - `$signingKey` (string|null): کلیلێکی نهێنی بە لایەنی کەم 16 بایت. ئەگەر دابنرێت، تۆمارەکان بە HMAC-SHA256 واژۆ دەکرێن و تۆماری بێ واژۆ یان دەستکاریکراو **پێش** deserialize کردن ڕەت دەکرێتەوە
-- `$lockProvider`: جێبەجێکردنی قفڵ (بنەڕەت: `FileLockProvider`)
+- `$lockProvider`: جێبەجێکردنی قفڵ (بنەڕەت: `FileLockProvider` لە بوخچەیەکی تایبەتی بەکارهێنەر لە temp ی سیستەم)
 - `$lockTimeout` (float): زۆرترین چرکەی چاوەڕوانی بۆ قفڵ لە cache miss؛ دواتر بەها بەبێ قفڵ هەژمار دەکرێت (بنەڕەت: 30)
+- `$allowUnsignedObjects` (bool): ڕێگەدان بە serializer ێک کە ئۆبجێکت دروست دەکات بەبێ کلیلی واژۆ. تەنها کاتێک سەلامەتە کە هیچ کەسێکی تر نەتوانێت لە هیچ چینێکدا بنووسێت
 
 **هەڵە:**
-- `\InvalidArgumentException` ئەگەر `$tiers` بەتاڵ بێت یان شتێکی تێدابێت کە `StorageInterface` نییە، ئەگەر کلیلی واژۆ لە 16 بایت کورتتر بێت، یان ناوی serializer/compressor بەتاڵ یان لە 255 بایت درێژتر بێت
+- `\InvalidArgumentException` ئەگەر `$tiers` بەتاڵ بێت یان شتێکی تێدابێت کە `StorageInterface` نییە، ئەگەر کلیلی واژۆ لە 16 بایت کورتتر بێت، ناوی serializer/compressor بەتاڵ یان لە 255 بایت درێژتر بێت، یان serializer بتوانێت ئۆبجێکت دروست بکات (`allowsObjects()`) و نە کلیلی واژۆ درابێت نە `allowUnsignedObjects: true`
 
 دروستکەر دەست لە سیستەمی فایل نادات: بوخچەی قفڵ لە یەکەم بەکارهێناندا دروست دەکرێت.
 
@@ -148,7 +151,7 @@ public function getMultiple(iterable $keys, mixed $default = null): array
 
 **هەڵە:** `InvalidArgument` ئەگەر یەکێک لە کلیلەکان نادروست یان string نەبێت
 
-ئەو storage انەی `BatchStorageInterface` جێبەجێ دەکەن لە هەر چینێکدا بە یەک داواکاری دەخوێندرێنەوە، و لە چینە نزمترەکان تەنها ئەو کلیلانە دەپرسرێن کە هێشتا نەدۆزراونەتەوە.
+هەر چینێک بە یەک بانگکردنی `getMany()` دەخوێندرێتەوە (لە Redis، APCu و PDO واتە یەک داواکاری)، و لە چینە نزمترەکان تەنها ئەو کلیلانە دەپرسرێن کە هێشتا نەدۆزراونەتەوە.
 
 ```php
 $cache->getMultiple(['key1', 'key2', 'key3'], null);
@@ -186,7 +189,7 @@ public function getOrSetSWR(
     null|int|DateInterval $ttl = null,
     int $swrSeconds = 0,
     int $staleIfErrorSeconds = 0,
-    array $options = []
+    RefreshMode $mode = RefreshMode::Sync
 ): mixed
 ```
 
@@ -195,10 +198,10 @@ public function getOrSetSWR(
 - `$ttl`: ماوەی تازەبوون. `null` واتە TTL ی بنەڕەت (`0` = هەرگیز بەسەرناچێت). بەهای بچووکتر یان یەکسان بە سفر واتە هەژمارکردن **بەبێ cache کردن**
 - `$swrSeconds`: تا چەند چرکە دوای بەسەرچوون بەهای کۆن پێشکەش بکرێت لە کاتێکدا نوێ دەکرێتەوە
 - `$staleIfErrorSeconds`: تا چەند چرکە دوای بەسەرچوون، ئەگەر producer هەڵەی دا، بەهای کۆن پێشکەش بکرێت
-- `$options['mode']`: `'sync'` (بنەڕەت) یان `'defer'`
+- `$mode`: `RefreshMode::Sync` (بنەڕەت) یان `RefreshMode::Defer` (`Iprodev\EasyCache\Cache\RefreshMode`)
 
 **هەڵە:**
-- `InvalidArgument` بۆ کلیل یان mode ی نادروست
+- `InvalidArgument` بۆ کلیلی نادروست
 - هەڵەکانی `$producer` کاتێک هیچ بەهایەکی کۆنی بەکارهاتوو نییە
 
 **ڕەفتار:**
@@ -206,7 +209,7 @@ public function getOrSetSWR(
 | دۆخی تۆمار | چی ڕوودەدات |
 |---|---|
 | تازە | دەستبەجێ دەگەڕێتەوە |
-| بەسەرچوو، لەناو `swrSeconds` | تەنها یەک پرۆسە تۆمارەکە نوێ دەکاتەوە؛ ئەو پرۆسانەی قفڵەکە وەرناگرن بەبێ چاوەڕوانی بەهای کۆن وەردەگرن. لە دۆخی `sync` پرۆسەی نوێکەرەوە بەهای **نوێ** دەگەڕێنێتەوە؛ لە دۆخی `defer` بەهای کۆن دەگەڕێتەوە و نوێکردنەوە دوای ناردنی وەڵام ئەنجام دەدرێت (PHP-FPM/LiteSpeed، ئەگەرنا `sync`). ئەگەر نوێکردنەوە سەرنەکەوێت بەهای کۆن دەگەڕێتەوە |
+| بەسەرچوو، لەناو `swrSeconds` | تەنها یەک پرۆسە تۆمارەکە نوێ دەکاتەوە؛ ئەو پرۆسانەی قفڵەکە وەرناگرن بەبێ چاوەڕوانی بەهای کۆن وەردەگرن. بە `RefreshMode::Sync` پرۆسەی نوێکەرەوە بەهای **نوێ** دەگەڕێنێتەوە؛ بە `RefreshMode::Defer` بەهای کۆن دەگەڕێتەوە و نوێکردنەوە دوای ناردنی وەڵام ئەنجام دەدرێت (PHP-FPM/LiteSpeed، ئەگەرنا `Sync`). ئەگەر نوێکردنەوە سەرنەکەوێت بەهای کۆن دەگەڕێتەوە |
 | بەسەرچوو، تەنها لەناو `staleIfErrorSeconds` | دووبارە هەژمار دەکرێت؛ تەنها ئەگەر producer هەڵە بدات بەهای کۆن دەگەڕێتەوە |
 | بوونی نییە (یان زۆر کۆنە) | لەژێر قفڵی تایبەت بەو کلیلە هەژمار دەکرێت (زۆرترین چاوەڕوانی `lockTimeout`). دوای وەرگرتنی قفڵ cache دووبارە دەپشکنرێت، بۆیە داواکارییە هاوکاتەکان producer تەنها یەک جار جێبەجێ دەکەن |
 
@@ -219,7 +222,7 @@ $data = $cache->getOrSetSWR(
     ttl: 300,
     swrSeconds: 60,
     staleIfErrorSeconds: 600,
-    options: ['mode' => 'defer'],
+    mode: RefreshMode::Defer,
 );
 ```
 
@@ -267,7 +270,7 @@ $cache->invalidateTags('team-7');
 public function prune(): int
 ```
 
-**دەگەڕێنێتەوە:** ژمارەی تۆمارە لابراوەکان. `FileStorage` و `PdoStorage` تۆمارە بەسەرچووەکان دەسڕنەوە (FileStorage هەروەها فایلی شێوازی نەناسراو و فایلی کاتیی بەجێماو پاک دەکاتەوە)؛ APCu و Redis خۆیان تۆمارەکان بەسەر دەبەن.
+**دەگەڕێنێتەوە:** ژمارەی تۆمارە لابراوەکان لەو چینانەی `PrunableStorageInterface` جێبەجێ دەکەن. `FileStorage` و `PdoStorage` تۆمارە بەسەرچووەکان دەسڕنەوە (FileStorage هەروەها فایلی شێوازی نەناسراو و فایلی کاتیی بەجێماو پاک دەکاتەوە)؛ APCu و Redis خۆیان تۆمارەکان بەسەر دەبەن.
 
 ---
 
@@ -289,6 +292,28 @@ public function resetStats(): void
 
 ---
 
+## CacheBuilder
+
+جێگرەوەیەکی fluent بۆ دروستکەر کە `MultiTierCache::builder()` دەیگەڕێنێتەوە:
+
+```php
+$cache = MultiTierCache::builder()
+    ->tier(new ApcuStorage('app:', maxTtl: 60))   // چینەکان بە ڕیز، خێراترین یەکەم
+    ->tiers($redisStorage, $fileStorage)          // یان چەند چینێک پێکەوە
+    ->serializer(new NativeSerializer([UserDto::class]))
+    ->compressor(new GzipCompressor(3))
+    ->signingKey($_ENV['EASYCACHE_SIGNING_KEY'])
+    ->defaultTtl(600)
+    ->logger($logger)
+    ->lockProvider(new RedisLockProvider($redis))  // یان ->lockPath('/var/lib/app/locks')
+    ->lockTimeout(10.0)
+    ->build();
+```
+
+`build()` بەبێ چین `\InvalidArgumentException` دەدات و هەمان پشکنینەکانی دروستکەر ئەنجام دەدات.
+
+---
+
 ## TaggedCache
 
 دیمەنێکی PSR-16 کە `MultiTierCache::tags()` دەیگەڕێنێتەوە. میتۆدەکانی `get`، `set`، `delete`، `has`، `getMultiple`، `setMultiple`، `deleteMultiple`، `getOrSetSWR`، `remember` و `forever` ی هەیە. `clear()` لەسەر ئەم دیمەنە tag ەکانی بەتاڵ دەکاتەوە. تۆمارەکان دەبێت بە هەمان کۆمەڵە tag بخوێندرێنەوە کە پێی نووسراون (ڕیزبەندی گرنگ نییە). درێژی کلیل زۆرترین 217 بایتە.
@@ -307,20 +332,20 @@ interface StorageInterface
     public function delete(string $key): bool;          // بۆ کلیلی نەبوویش true
     public function has(string $key): bool;
     public function clear(): bool;                      // تەنها تۆمارەکانی ئەم storage ە
-    public function prune(): int;                       // ژمارەی تۆمارە لابراوەکان
+    public function getMany(array $keys): array;        // payload ە دۆزراوەکان بەپێی کلیل
+    public function setMany(array $payloads, int $ttl): bool;
+    public function deleteMany(array $keys): bool;
 }
 ```
 
-### BatchStorageInterface
+### PrunableStorageInterface
 
-ئارەزوومەندانە؛ هەموو storage ە ناوخۆییەکان جێبەجێیان کردووە:
+بۆ ئەو backend انەی خۆیان تۆمارەکان بەسەر نابەن (`FileStorage` و `PdoStorage`):
 
 ```php
-interface BatchStorageInterface extends StorageInterface
+interface PrunableStorageInterface extends StorageInterface
 {
-    public function getMany(array $keys): array;              // payload ە دۆزراوەکان بەپێی کلیل
-    public function setMany(array $payloads, int $ttl): bool;
-    public function deleteMany(array $keys): bool;
+    public function prune(): int; // ژمارەی تۆمارە لابراوەکان
 }
 ```
 
@@ -386,7 +411,7 @@ public function __construct(object $redisClient, string $prefix = 'ec:', ?Logger
 **تێبینی:**
 - `SETEX` بۆ TTL، `MGET` بۆ خوێندنەوەی کۆمەڵ و pipeline بۆ نووسینی کۆمەڵ
 - `clear()` بە `SCAN` ی نابلۆککەر و prefix ی escape کراو کار دەکات (بۆ Predis یش) و prefix ی ئاستی client (`Redis::OPT_PREFIX` و هەڵبژاردەی `prefix` لە Predis) بەدروستی بەڕێوە دەبات
-- `prune()` سفر دەگەڕێنێتەوە (Redis خۆی کلیلەکان بەسەر دەبات)
+- Redis خۆی کلیلەکان بەسەر دەبات، بۆیە `RedisStorage` میتۆدی `prune()` ی نییە
 
 ---
 
@@ -457,7 +482,9 @@ public function __construct(object $redis, string $prefix = 'ec:lock:', int $ttl
 
 قفڵ ناچالاک دەکات (هەر قفڵێک دەستبەجێ وەردەگیرێت).
 
-### Util\Lock
+### FileLock
+
+`Iprodev\EasyCache\Lock\FileLock` (پێش 4.0 بە ناوی `Util\Lock`):
 
 ```php
 public function __construct(string $path, bool $removeOnRelease = true)
@@ -480,21 +507,27 @@ interface SerializerInterface
     public function serialize(mixed $value): string;
     public function deserialize(string $payload): mixed; // بۆ داتای نادروست دەبێت exception بدات
     public function name(): string;                      // 1 تا 255 بایت، لەگەڵ هەر تۆمارێک هەڵدەگیرێت
+    public function allowsObjects(): bool;               // ئایا deserialize() دەتوانێت ئۆبجێکت دروست بکات؟
 }
 ```
+
+ئەو serializer انەی `allowsObjects()` یان `true` ە لە `MultiTierCache` دا پێویستیان بە کلیلی واژۆ (یان `allowUnsignedObjects: true`) هەیە.
 
 ### NativeSerializer
 
 ```php
-public function __construct(bool|array $allowedClasses = true, int $maxDepth = 0)
+public function __construct(bool|array $allowedClasses = false, int $maxDepth = 0)
 ```
 
-- `$allowedClasses`: `true` (هەر پۆلێک)، `false` (بێ ئۆبجێکت) یان لیستێک لە ناوی پۆلەکان. پۆلەکانی تر دەبنە `__PHP_Incomplete_Class`
+- `$allowedClasses`: `false` (بنەڕەت: بێ ئۆبجێکت، تەنها بەهای سادە و array)، لیستێک لە ناوی پۆلەکان، یان `true` (هەر پۆلێک)
+- نووسینی ئۆبجێکتێک لە پۆلێکی ڕێگەپێنەدراو `\InvalidArgumentException` دەدات (`set()` بەهای `false` دەگەڕێنێتەوە و تۆماری دەکات)
+- خوێندنەوەی تۆمارێک کە ئۆبجێکتی پۆلێکی ڕێگەپێنەدراوی تێدایە `\UnexpectedValueException` دەدات (واتە miss)
+- `allowsObjects()` هەمیشە `true` ە مەگەر `$allowedClasses` بەرامبەر `false` (یان لیستی بەتاڵ) بێت
 - `$maxDepth`: زۆرترین قووڵی (0 = بنەڕەتی PHP)
 - بۆ payload ی نادروست `\UnexpectedValueException` دەدات (بەهای `false` ی هەڵگیراو هەر `false` دەگەڕێتەوە)
 - ناو: `php`
 
-> unserialize کردنی داتایەک کە هێرشبەر کۆنترۆڵی دەکات دەتوانێت ببێتە هۆی جێبەجێکردنی کۆد. `$allowedClasses` سنووردار بکە و/یان کلیلی واژۆ بەکاربهێنە.
+> unserialize کردنی ئۆبجێکتێک کە هێرشبەر کۆنترۆڵی دەکات دەتوانێت ببێتە هۆی جێبەجێکردنی کۆد؛ بۆیە پشتگیری ئۆبجێکت پێویستی بە کلیلی واژۆ هەیە.
 
 ### JsonSerializer
 
@@ -502,7 +535,7 @@ public function __construct(bool|array $allowedClasses = true, int $maxDepth = 0
 public function __construct(int $depth = 512)
 ```
 
-- هەرگیز ئۆبجێکت دروست ناکات: ئۆبجێکتەکان وەک ڕیزی هاوبەش دەگەڕێنەوە
+- هەرگیز ئۆبجێکت دروست ناکات: ئۆبجێکتەکان وەک ڕیزی هاوبەش دەگەڕێنەوە (`allowsObjects()` بەرامبەر `false`)
 - جۆری float دەپارێزرێت (`1.0` هەر float دەمێنێتەوە)
 - بۆ داتای نادروست `\JsonException` دەدات
 - ناو: `json`
@@ -626,6 +659,7 @@ return [
     'default_ttl' => 600,
     'sign' => true,                     // واژۆکردنی تۆمارەکان...
     'signing_key' => null,              // ...بەم کلیلە یان کلیلێک کە لە APP_KEY وەرگیراوە
+    'allow_unsigned_objects' => false,  // بۆ cache کردنی ئۆبجێکت لەگەڵ 'sign' => false پێویستە
     'lock' => ['driver' => 'file', 'path' => storage_path('framework/cache/easycache-locks'), 'timeout' => 30],
     'apcu' => ['prefix' => 'ec:', 'max_ttl' => 60],
     'redis' => ['client' => 'phpredis', 'host' => '127.0.0.1', 'port' => 6379, 'prefix' => 'ec:'],

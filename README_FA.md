@@ -1,19 +1,19 @@
-# 🚀 PHP EasyCache v3 — کتابخانه Cache چند لایه با SWR
+# 🚀 PHP EasyCache v4 — کتابخانه Cache چند لایه با SWR
 
 **EasyCache** یک کتابخانه cache حرفه‌ای و کامل است که استاندارد **PSR-16** را پیاده‌سازی می‌کند و قابلیت‌های پیشرفته زیر را دارد:
 
 - 🚀 ذخیره‌سازی چند لایه: **APCu، Redis، File و PDO (MySQL/PostgreSQL/SQLite)**
 - 🔒 **نوشتن اتمی** برای file storage و **جلوگیری از cache stampede** با قفل مخصوص هر کلید (فایلی یا Redis)
 - ⚡ **SWR کامل** (*stale-while-revalidate* + *stale-if-error*)
-- 🛡️ **رکوردهای ضد دستکاری**: امضای اختیاری HMAC-SHA256 و عدم استفاده از `unserialize()` برای هدر رکوردها
+- 🛡️ **امن به‌طور پیش‌فرض**: هیچ شیئی unserialize نمی‌شود مگر خودتان اجازه دهید، و آن هم فقط از رکوردهای امضاشده با HMAC
 - 🔧 **Serializer و Compressor قابل تعویض** (PHP/JSON + هیچ/Gzip/Zstd یا پیاده‌سازی خودتان)
 - 🔄 **Backfill خودکار** بین لایه‌ها
 - 📦 **عملیات دسته‌ای** (`MGET`، `IN (...)`، `apcu_fetch([...])`)، **tag**، `remember()`، `forever()` و آمار
 - 🎯 یکپارچه‌سازی کامل با **Laravel**: Service Provider، Facade و دستورات artisan
 - ✅ تست‌شده روی File، SQLite، MySQL، PostgreSQL، Redis (phpredis و Predis) و APCu
 
-> نسخه: **v3.1.0** — نیازمند **PHP 8.1+** و `psr/simple-cache` نسخهٔ `^2 || ^3`
-> از 3.0 ارتقا می‌دهید؟ [MIGRATION.md](MIGRATION.md) را بخوانید.
+> نسخه: **v4.0.0** (در حال توسعه) — نیازمند **PHP 8.3+** و `psr/simple-cache` نسخهٔ `^3`
+> از 3.x ارتقا می‌دهید؟ [MIGRATION.md](MIGRATION.md) را بخوانید.
 
 ---
 
@@ -102,30 +102,49 @@ $result = $cache->getOrSetSWR(
     ttl: 300,                  // 5 دقیقه تازه
     swrSeconds: 120,           // 2 دقیقه قدیمی
     staleIfErrorSeconds: 600,  // 10 دقیقه اگر خطا رخ داد
-    options: ['mode' => 'defer']
+    mode: RefreshMode::Defer
 );
 ```
 
 **نحوهٔ کار:**
 1. رکورد **تازه** → فوراً برگردانده می‌شود.
 2. **منقضی، داخل `swrSeconds`** → یک پروسه رکورد را تازه می‌کند و بقیه بدون انتظار مقدار قدیمی را می‌گیرند.
-   - `mode: 'sync'` (پیش‌فرض): پروسهٔ تازه‌کننده مقدار **جدید** را برمی‌گرداند.
-   - `mode: 'defer'`: مقدار قدیمی برگردانده می‌شود و تازه‌سازی بعد از ارسال پاسخ انجام می‌شود (`fastcgi_finish_request()` یا LiteSpeed؛ در غیر این صورت مثل `sync`).
+   - `RefreshMode::Sync` (پیش‌فرض): پروسهٔ تازه‌کننده مقدار **جدید** را برمی‌گرداند.
+   - `RefreshMode::Defer`: مقدار قدیمی برگردانده می‌شود و تازه‌سازی بعد از ارسال پاسخ انجام می‌شود (`fastcgi_finish_request()` یا LiteSpeed؛ در غیر این صورت مثل `Sync`).
+
+`RefreshMode` همان `Iprodev\EasyCache\Cache\RefreshMode` است.
 3. **منقضی، فقط داخل `staleIfErrorSeconds`** → مقدار دوباره محاسبه می‌شود و فقط **اگر producer خطا بدهد** مقدار قدیمی برگردانده می‌شود.
 4. **ناموجود** → زیر قفل مخصوص همان کلید محاسبه می‌شود تا درخواست‌های همزمان producer را فقط یک بار اجرا کنند.
 
 TTL برابر `null` یعنی TTL پیش‌فرض (`0` = بدون انقضا) و TTL کوچک‌تر یا مساوی صفر یعنی محاسبه بدون کش. نتیجهٔ `null` هم کش می‌شود.
 
-### 3. امنیت: رکوردهای امضاشده
+### 3. امنیت: پیش‌فرض‌های امن و رکوردهای امضاشده
 
-هر کسی که بتواند در backend کش بنویسد (Redis بدون رمز، پوشهٔ کش مشترک، جدول مشترک دیتابیس و...) در غیر این صورت می‌تواند رکورد جعلی بکارد. EasyCache هیچ‌وقت هدر رکوردها را با `unserialize()` نمی‌خواند و با کلید امضا، هر رکورد امضای HMAC-SHA256 دارد: رکوردهای بدون امضا یا دستکاری‌شده **پیش از** deserialize شدن رد می‌شوند.
+هر کسی که بتواند در backend کش بنویسد (Redis بدون رمز، پوشهٔ کش مشترک، جدول مشترک دیتابیس و...) در غیر این صورت می‌تواند رکورد جعلی بکارد، و unserialize کردن یک شیء جعلی می‌تواند به اجرای کد برسد. EasyCache 4 به‌طور پیش‌فرض امن است:
+
+- `NativeSerializer` فقط مقادیر ساده و آرایه را کش می‌کند. شیئی از کلاسی که اجازه نداده‌اید هنگام نوشتن رد و هنگام خواندن نادیده گرفته می‌شود.
+- برای کش کردن شیء، کلاس‌هایش را در `allowedClasses` فهرست کنید. serializerی که می‌تواند شیء بسازد **کلید امضا لازم دارد**: هر رکورد امضای HMAC-SHA256 دارد و رکوردهای بدون امضا یا دستکاری‌شده **پیش از** deserialize شدن رد می‌شوند.
 
 ```php
 $cache = new MultiTierCache(
     [$redisStore],
-    new NativeSerializer(allowedClasses: [UserDto::class]), // یا false: هیچ شیئی ساخته نشود
+    new NativeSerializer(allowedClasses: [UserDto::class]), // true = هر کلاسی
     signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],             // حداقل ۱۶ بایت تصادفی
 );
+```
+
+اگر هیچ کس جز برنامهٔ شما نمی‌تواند در هیچ لایه‌ای بنویسد، می‌توانید به‌جای کلید امضا `allowUnsignedObjects: true` بدهید.
+
+ساختن کش با builder هم ممکن است:
+
+```php
+$cache = MultiTierCache::builder()
+    ->tier(new ApcuStorage('app:', maxTtl: 60))
+    ->tier(new RedisStorage($redis, 'app:'))
+    ->serializer(new NativeSerializer([UserDto::class]))
+    ->signingKey($_ENV['EASYCACHE_SIGNING_KEY'])
+    ->defaultTtl(600)
+    ->build();
 ```
 
 ### 4. متدهای کمکی
@@ -148,11 +167,13 @@ $cache->getStats(); // ['hits' => .., 'misses' => .., 'hit_ratio' => 0.93, ...]
 ### 5. Serializer و Compressor قابل تعویض
 
 ```php
-// Serializer نیتیو PHP (پشتیبانی از objects؛ کلاس‌های مجاز را محدود کنید)
+// Serializer نیتیو PHP: به‌طور پیش‌فرض فقط مقادیر ساده و آرایه؛
+// شیء فقط برای کلاس‌های فهرست‌شده و همراه با کلید امضا
 $cache = new MultiTierCache(
     [$storage],
-    new NativeSerializer(allowedClasses: true),
-    new GzipCompressor(5)
+    new NativeSerializer([Money::class]),
+    new GzipCompressor(5),
+    signingKey: $key
 );
 
 // Serializer JSON (هیچ‌وقت شیء نمی‌سازد؛ اشیاء به آرایه تبدیل می‌شوند)
@@ -248,7 +269,7 @@ $posts = $cache->getOrSetSWR(
     ttl: 300,          // 5 دقیقه تازه
     swrSeconds: 60,    // 1 دقیقه قدیمی
     staleIfErrorSeconds: 300,
-    options: ['mode' => 'defer']
+    mode: RefreshMode::Defer
 );
 ```
 
@@ -287,7 +308,7 @@ EASYCACHE_LOCK_DRIVER=redis         # file|redis|none
 EASYCACHE_COMPRESSOR=gzip           # none|gzip|zstd
 ```
 
-- رکوردها به‌طور پیش‌فرض با کلیدی مشتق از `APP_KEY` **امضا** می‌شوند (`EASYCACHE_SIGNING_KEY` برای کلید دلخواه، `EASYCACHE_SIGN=false` برای غیرفعال کردن).
+- رکوردها به‌طور پیش‌فرض با کلیدی مشتق از `APP_KEY` **امضا** می‌شوند (`EASYCACHE_SIGNING_KEY` برای کلید دلخواه، `EASYCACHE_SIGN=false` برای غیرفعال کردن). با امضای خاموش، کش کردن شیء فقط با `EASYCACHE_ALLOW_UNSIGNED_OBJECTS=true` یا `serializer.allowed_classes = false` ممکن است.
 - درایوری که راه‌اندازی نشود (افزونهٔ ناموجود، Redis خاموش و...) با یک warning در لاگ کنار گذاشته می‌شود.
 - کش از طریق `app('easycache')`، Facade یا type-hint کردن `MultiTierCache` در دسترس است.
 
@@ -438,7 +459,7 @@ $data = $cache->getOrSetSWR(
     'expensive_query',
     fn() => expensiveOperation(),
     300, 60, 600,
-    ['mode' => 'defer']  // پاسخ سریع‌تر
+    RefreshMode::Defer  // پاسخ سریع‌تر
 );
 ```
 

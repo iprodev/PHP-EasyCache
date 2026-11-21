@@ -1,5 +1,61 @@
 # Migration Guide
 
+## 3.x → 4.0
+
+4.0 makes the safe configuration the default and cleans up the API. Cache
+entries written by 3.1 stay readable (same entry format).
+
+### Requirements
+
+PHP 8.3+, `psr/simple-cache` 3, `psr/log` 2 or 3. Laravel integration: Laravel 12+.
+
+### Caching objects
+
+`NativeSerializer` no longer allows objects by default. If you cache objects:
+
+```php
+// 3.x: any class, unsigned
+$cache = new MultiTierCache($tiers, new NativeSerializer());
+
+// 4.0: list the classes and sign the entries
+$cache = new MultiTierCache(
+    $tiers,
+    new NativeSerializer(allowedClasses: [UserDto::class, Money::class]), // or true for any class
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY'], // >= 16 random bytes
+);
+```
+
+- A serializer that can create objects without a `signingKey` throws an
+  `InvalidArgumentException` when the cache is created. If (and only if)
+  nobody but your application can write to any cache tier, pass
+  `allowUnsignedObjects: true` instead.
+- With the default serializer, `set()` of an object returns `false` (and logs
+  why); entries containing objects of classes that are not allowed are cache misses.
+- Laravel signs entries by default, so the default configuration keeps
+  working. With `EASYCACHE_SIGN=false`, either set
+  `serializer.allowed_classes` to `false` or `EASYCACHE_ALLOW_UNSIGNED_OBJECTS=true`.
+
+### API changes
+
+| 3.x | 4.0 |
+|---|---|
+| `getOrSetSWR($k, $fn, $ttl, $swr, $sei, ['mode' => 'defer'])` | `getOrSetSWR($k, $fn, $ttl, $swr, $sei, RefreshMode::Defer)` |
+| `new MultiTierCache($tiers, ..., lockPath: '/dir')` | `new MultiTierCache($tiers, ..., lockProvider: new FileLockProvider('/dir'))` or `MultiTierCache::builder()->lockPath('/dir')` |
+| Constructor arguments after `$logger` passed by position | Pass them by name (`clock:`, `signingKey:`, `lockProvider:`, `lockTimeout:`), or use `MultiTierCache::builder()` |
+| `class MyCache extends MultiTierCache` | `MultiTierCache` is final: wrap it instead of extending it |
+| `Iprodev\EasyCache\Util\Lock` | `Iprodev\EasyCache\Lock\FileLock` |
+| `Iprodev\EasyCache\EasyCache` (v2 wrapper) | `MultiTierCache` with a `FileStorage` tier |
+| `$redisStorage->prune()`, `$apcuStorage->prune()` | Removed (the backends expire entries themselves); `MultiTierCache::prune()` still works |
+
+### Custom storages and serializers
+
+- Storages implement `getMany()`, `setMany()` and `deleteMany()` (formerly the
+  optional `BatchStorageInterface`, which no longer exists), and
+  `PrunableStorageInterface` if expired entries must be removed explicitly.
+- Serializers implement `allowsObjects(): bool`: return `true` if
+  `deserialize()` can instantiate objects.
+
+
 ## 3.0.x → 3.1
 
 3.1 fixes several security issues and bugs. Most applications upgrade without

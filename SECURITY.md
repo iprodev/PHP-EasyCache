@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 3.1.x   | ✅ |
+| 4.0.x   | ✅ |
+| 3.1.x   | ✅ security fixes |
 | 3.0.x   | ❌ (contains known vulnerabilities, please upgrade) |
 | < 3.0   | ❌ |
 
@@ -29,8 +30,9 @@ to a backend can plant entries, so:
 1. **Sign entries**: pass a secret `signingKey` (at least 16 random bytes) to
    `MultiTierCache`. Unsigned or tampered entries are then rejected before
    they are deserialized. The Laravel integration does this by default.
-2. **Restrict deserialization**: prefer `JsonSerializer`, or limit
-   `NativeSerializer` with `allowedClasses` (`false` or a list of classes).
+2. **Restrict deserialization**: `NativeSerializer` allows no objects by
+   default in 4.0; only list the classes you really cache in `allowedClasses`.
+   Do not use `allowUnsignedObjects` unless nobody else can write to any tier.
 3. **Protect the backends**: Redis with authentication (and TLS across
    networks), dedicated database credentials, cache directories outside the
    web root and not shared with other users.
