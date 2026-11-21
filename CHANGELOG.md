@@ -60,12 +60,17 @@ or are removed by `prune()`). See [MIGRATION.md](MIGRATION.md).
 - ♻️ `psr/simple-cache` `^2.0 || ^3.0` and `psr/log` `^1.1 || ^2.0 || ^3.0` are supported; the package provides `psr/simple-cache-implementation`.
 - ♻️ Laravel config: drivers default to `file` (`EASYCACHE_DRIVERS`), APCu TTL capped at 60s.
 - ♻️ File names use xxh128 instead of md5.
-- ♻️ `phpunit.xml` and `phpstan.neon` renamed to `*.dist`; PHPStan now also analyses the Laravel integration (Larastan).
+- ♻️ `phpunit.xml` and `phpstan.neon` renamed to `*.dist`; PHPStan 2.1 (level 8) for the library and Larastan for the Laravel integration (`composer stan:laravel`); PHPUnit 10.5 or 11.5.
+- ♻️ Laravel is no longer a dev dependency: the Laravel tests run in their own suite (`composer test:laravel`) against Testbench 10/11.
 
 ### Tests & tooling
 - ✅ Storage contract test-suite run against File, SQLite, MySQL, PostgreSQL, phpredis, Predis and APCu.
 - ✅ SWR/stale-if-error, security, tags, PSR-16 compliance, concurrency (multi-process), Laravel and CLI tests.
-- ✅ CI with Redis, MySQL and PostgreSQL services, APCu and zstd, code coverage, a lowest-dependencies run and `composer audit`.
+- ✅ CI with Redis, MySQL and PostgreSQL services, APCu and zstd on PHP 8.1-8.4, a Laravel 12/13 job, code coverage, a lowest-dependencies run and `composer audit`.
+
+### Docs
+- 📝 README, API reference and examples updated in English, Persian and Kurdish; new MIGRATION guide and SECURITY policy.
+- 📝 Fixed examples that used invalid keys (`:`/`/` from IPs, paths or `user:123`-style names), a racy hand-made lock and a hand-made tag implementation that deleted its own index (`set(..., 0)`).
 
 ---
 

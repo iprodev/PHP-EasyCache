@@ -211,17 +211,18 @@ df -h
 $cache->clear();
 ```
 
-3. **Set up automatic cleanup:**
+3. **Set up automatic cleanup** (FileStorage does not delete expired files by itself):
 ```bash
-# Add to crontab
-0 2 * * * php /path/to/cleanup.php
+# Add to crontab: delete expired entries, old-format files and orphaned temp files every hour
+0 * * * * /path/to/project/vendor/bin/easycache-prune /var/cache/myapp
+
+# Laravel
+php artisan easycache:prune
 ```
 
-cleanup.php:
+or from PHP:
 ```php
-<?php
-$cache->prune();  // For PDO
-$cache->clear();  // Or clear all
+$cache->prune();  // File and PDO storages delete expired entries
 ```
 
 ### PDO: Table Not Found
@@ -335,6 +336,15 @@ $hitRate = $hits / ($hits + $misses);
 echo "Hit rate: " . ($hitRate * 100) . "%";
 ```
 
+`getStats()` gives the same numbers for the current instance:
+
+```php
+print_r($cache->getStats()); // hits, misses, stale_hits, hit_ratio, errors...
+```
+
+A high `errors` count usually means a tier is failing (check the PSR-3 log)
+or entries are rejected (wrong signing key, serializer changed).
+
 **Solutions:**
 
 1. **Increase TTL:**
@@ -419,8 +429,9 @@ $cache->clear();
 
 2. **Check serializer compatibility:**
 ```php
-// If you changed serializer, old data might be incompatible
-$cache->clear();  // Clear old data
+// Entries written with another serializer are treated as misses (never returned as
+// garbage) and are recomputed. Clearing is optional:
+$cache->clear();
 ```
 
 3. **Verify data before caching:**
@@ -450,15 +461,18 @@ function updateUser($id, $data) {
 $cache->set('key', $value, 300);  // 5 minutes instead of 1 hour
 ```
 
-3. **Use version keys:**
+3. **Use tags to invalidate groups of entries:**
 ```php
-$version = $cache->get('data_version') ?? 1;
-$key = "data_v{$version}";
-$data = $cache->get($key);
+$cache->tags(['users'])->set("user_{$id}", $user, 3600);
 
-// When data changes:
-$cache->set('data_version', $version + 1);
+// When users change:
+$cache->invalidateTags('users');
 ```
+
+4. **Several servers with APCu in front of Redis?** APCu is local to each
+server, so a `set()`/`delete()` on one server does not update the others.
+Cap the APCu TTL (`new ApcuStorage('app:', maxTtl: 30)`, Laravel:
+`EASYCACHE_APCU_MAX_TTL`) so other servers pick up changes quickly.
 
 ### Serialization Errors
 
@@ -733,6 +747,40 @@ echo $cache->get('test');  // Should output: value
 
 ---
 
+## Upgrading to 3.1
+
+### Everything is a cache miss right after the upgrade
+
+Expected: 3.1 uses a new entry format (`EC03`), so entries written by 3.0.x
+are ignored and recomputed. Run `prune()` / `easycache-prune` to delete old
+files; Redis/APCu entries expire on their own.
+
+### MySQL: `Data too long for column 'payload'`
+
+Tables created by 3.0.x use `BLOB` (64 KB). Run `$storage->upgradeSchema()`
+once (or `ALTER TABLE easycache MODIFY k VARBINARY(64) NOT NULL, MODIFY payload LONGBLOB NOT NULL`).
+
+### PostgreSQL never returned hits (3.0.x)
+
+Payloads were bound as text and truncated at the first NUL byte. Fixed in 3.1;
+no schema change is needed.
+
+### "Could not acquire lock for key ..., computing without it"
+
+The lock directory is not usable or another process held the lock longer than
+`lockTimeout`. The default lock directory is a per-user directory in the
+system temp dir that must be owned by the PHP user and not writable by others;
+configure `lockPath` (Laravel: `EASYCACHE_LOCK_PATH`) if that is not possible,
+or use `RedisLockProvider`. The value is still computed and cached.
+
+### Laravel: "driver ... is unavailable and was skipped"
+
+A driver listed in `EASYCACHE_DRIVERS` could not be initialised (APCu not
+enabled, Redis unreachable...). The other drivers keep working. Set
+`EASYCACHE_SKIP_UNAVAILABLE=false` to make this an error instead.
+
+---
+
 ## Common Error Messages
 
 | Error | Cause | Solution |
@@ -740,7 +788,11 @@ echo $cache->get('test');  // Should output: value
 | `RuntimeException: APCu extension is not available` | APCu not installed | Install php-apcu |
 | `RuntimeException: Unable to create cache directory` | Permission denied | Fix directory permissions |
 | `RedisException: Connection refused` | Redis not running | Start Redis service |
-| `InvalidArgument: Illegal cache key` | Invalid key format | Use only `A-Za-z0-9_.` |
+| `InvalidArgument: Illegal cache key` | Whitespace, control/non-ASCII characters or `{}()/\@:` in the key | Use printable ASCII without reserved characters (max 255 bytes) |
+| `InvalidArgumentException: The signing key must be at least 16 bytes long` | Short signing key | Use at least 16 random bytes, e.g. `bin2hex(random_bytes(32))` |
+| `InvalidArgumentException: RedisStorage requires a non-empty prefix` | Empty Redis/APCu prefix | Use a prefix such as `myapp:` |
+| `InvalidArgumentException: Invalid table name` | Table name with spaces/quotes | Use letters, digits and `_` (optionally `schema.table`) |
+| Log: `Rejected unsigned cache entry` / `invalid signature` | Entry written without/with another signing key, or tampered with | Use the same signing key everywhere; investigate if unexpected |
 | `JsonException: Malformed UTF-8` | Invalid JSON data | Use NativeSerializer |
 | `PDOException: Table not found` | Table doesn't exist | Call `ensureTable()` |
 

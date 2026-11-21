@@ -32,7 +32,8 @@ class MysqlStorageTest extends StorageContractTestCase
         $this->assertNotNull($pdo);
         $pdo->exec('DROP TABLE IF EXISTS easycache_legacy');
         $pdo->exec(
-            'CREATE TABLE easycache_legacy (k VARCHAR(64) PRIMARY KEY, payload BLOB NOT NULL, expires_at BIGINT NOT NULL)'
+            'CREATE TABLE easycache_legacy '
+            . '(k VARCHAR(64) PRIMARY KEY, payload BLOB NOT NULL, expires_at BIGINT NOT NULL)'
         );
 
         $storage = new PdoStorage($pdo, 'easycache_legacy', $this->clock);

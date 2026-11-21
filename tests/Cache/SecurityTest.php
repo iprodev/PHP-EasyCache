@@ -33,8 +33,7 @@ class SecurityTest extends TestCase
         ?SerializerInterface $serializer = null,
         ?string $key = null,
         ?MemoryLogger $logger = null
-    ): MultiTierCache
-    {
+    ): MultiTierCache {
         return new MultiTierCache(
             [$this->storage],
             $serializer,
