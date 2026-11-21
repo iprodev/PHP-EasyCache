@@ -11,7 +11,8 @@ use Psr\SimpleCache\CacheInterface;
 /**
  * A PSR-16 view of a MultiTierCache whose entries belong to a set of tags.
  *
- * Keys are namespaced by the current version of every tag, so invalidating
+ * Keys are namespaced by the current version of every tag (resolved with one
+ * batch read per operation, also for the *Multiple() methods), so invalidating
  * a tag (MultiTierCache::invalidateTags() or clear() on this view) makes all
  * its entries unreachable at once. Read entries with the same tags they were
  * written with.
@@ -83,9 +84,10 @@ final class TaggedCache implements CacheInterface
      */
     public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
     {
+        $namespace = $this->cache->tagNamespace($this->tags);
         $items = [];
         foreach ($values as $key => $value) {
-            $items[$this->key(KeyValidator::normalize($key))] = $value;
+            $items[MultiTierCache::namespacedKey($namespace, KeyValidator::normalize($key))] = $value;
         }
         return $this->cache->setMultiple($items, $ttl);
     }
@@ -137,6 +139,21 @@ final class TaggedCache implements CacheInterface
         return $this->cache->forever($this->key($key), $value);
     }
 
+    public function increment(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+    {
+        return $this->cache->increment($this->key($key), $by, $ttl);
+    }
+
+    public function decrement(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+    {
+        return $this->cache->decrement($this->key($key), $by, $ttl);
+    }
+
+    public function add(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
+    {
+        return $this->cache->add($this->key($key), $value, $ttl);
+    }
+
     private function key(string $key): string
     {
         return $this->cache->taggedKey($this->tags, $key);
@@ -148,10 +165,11 @@ final class TaggedCache implements CacheInterface
      */
     private function keyMap(iterable $keys): array
     {
+        $namespace = $this->cache->tagNamespace($this->tags);
         $map = [];
         foreach ($keys as $key) {
             $key = KeyValidator::normalize($key);
-            $map[$this->key($key)] = $key;
+            $map[MultiTierCache::namespacedKey($namespace, $key)] = $key;
         }
         return $map;
     }

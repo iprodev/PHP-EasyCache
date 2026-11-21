@@ -82,6 +82,23 @@ class TaggedCacheTest extends TestCase
         $this->assertSame(['n' => null, 'm' => 'd'], $view->getMultiple(['n', 'm'], 'd'));
     }
 
+    public function testMultipleOperationsResolveTagVersionsOnce(): void
+    {
+        $clock = new FrozenClock();
+        $storage = new ArrayStorage($clock);
+        $cache = new MultiTierCache([$storage], clock: $clock, lockProvider: new NullLockProvider());
+        $view = $cache->tags(['a', 'b']);
+        $view->set('warm-up', 1); // creates the tag versions
+
+        $storage->calls = [];
+        $view->setMultiple(['k1' => 1, 'k2' => 2, 'k3' => 3]);
+        $view->getMultiple(['k1', 'k2', 'k3']);
+
+        // One version read per operation plus the data read itself.
+        $this->assertSame(3, $storage->calls['getMany'] ?? 0);
+        $this->assertSame(['k1' => 1, 'k2' => 2], $view->getMultiple(['k1', 'k2']));
+    }
+
     public function testTagsAreValidated(): void
     {
         $this->expectException(InvalidArgument::class);

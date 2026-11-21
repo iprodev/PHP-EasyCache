@@ -49,6 +49,7 @@ final class MultiTierCache implements CacheInterface
     private const int MAC_LENGTH = 32;
     private const int MAX_WINDOW = 4294967295;
     private const string TAG_VERSION_PREFIX = '__ec_tag.';
+    private const string ATOMIC_LOCK_PREFIX = 'ec-atomic:';
 
     /** @var list<StorageInterface> */
     private array $tiers;
@@ -433,6 +434,75 @@ final class MultiTierCache implements CacheInterface
     }
 
     /**
+     * Atomically add $by to an integer entry and return the new value.
+     *
+     * A missing (or expired) entry starts at 0 and is created with $ttl
+     * (null = default TTL, <= 0 = no expiry); an existing entry keeps its
+     * expiry. Returns false when the entry holds a non-integer value or the
+     * lock cannot be acquired within the lock timeout.
+     *
+     * Atomicity comes from the lock provider: file locks serialize the
+     * processes of one machine, RedisLockProvider all servers.
+     */
+    public function increment(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+    {
+        KeyValidator::assert($key);
+
+        return $this->atomically($key, function () use ($key, $by, $ttl): int|false {
+            $current = $this->lookup([$key], false)[$key] ?? null;
+
+            if ($current === null) {
+                $value = $by;
+                $expires = $this->atomicExpiry($ttl);
+                $swr = $sei = 0;
+            } else {
+                $old = $current['value'];
+                if (is_string($old) && preg_match('/^-?\d+$/', $old) === 1) {
+                    $old = (int) $old;
+                }
+                if (!is_int($old)) {
+                    $this->log('warning', 'Cannot increment key {key}: the cached value is not an integer', [
+                        'key' => $key,
+                    ]);
+                    return false;
+                }
+                $value = $old + $by;
+                $expires = $current['expires'];
+                $swr = $current['swr'];
+                $sei = $current['sei'];
+            }
+
+            return $this->store($key, $value, $expires, $swr, $sei) ? $value : false;
+        });
+    }
+
+    /**
+     * Atomically subtract $by from an integer entry (see increment()).
+     */
+    public function decrement(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+    {
+        return $this->increment($key, -$by, $ttl);
+    }
+
+    /**
+     * Store a value only if the key has no fresh entry (atomic, see increment()).
+     *
+     * $ttl: null = default TTL, <= 0 = no expiry. Returns true when the value was stored.
+     */
+    public function add(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
+    {
+        KeyValidator::assert($key);
+
+        return $this->atomically($key, function () use ($key, $value, $ttl): bool {
+            if (isset($this->lookup([$key], false, false, false)[$key])) {
+                return false;
+            }
+
+            return $this->store($key, $value, $this->atomicExpiry($ttl), 0, 0);
+        }) === true;
+    }
+
+    /**
      * Store a value without expiry.
      */
     public function forever(string $key, mixed $value): bool
@@ -484,8 +554,18 @@ final class MultiTierCache implements CacheInterface
      */
     public function taggedKey(array $tags, string $key): string
     {
-        KeyValidator::assert($key);
+        return self::namespacedKey($this->tagNamespace($tags), $key);
+    }
 
+    /**
+     * Key prefix for the current versions of a set of tags. All versions are
+     * read with one getMultiple(); missing versions are created atomically.
+     *
+     * @internal Used by TaggedCache.
+     * @param list<string> $tags
+     */
+    public function tagNamespace(array $tags): string
+    {
         $versionKeys = [];
         foreach ($tags as $tag) {
             $versionKeys[$tag] = self::TAG_VERSION_PREFIX . $tag;
@@ -497,20 +577,34 @@ final class MultiTierCache implements CacheInterface
             $version = $current[$versionKey] ?? null;
             if (!is_string($version)) {
                 $version = bin2hex(random_bytes(8));
-                $this->forever($versionKey, $version);
+                if (!$this->add($versionKey, $version, 0)) {
+                    // Another process created the version first: use theirs.
+                    $existing = $this->get($versionKey);
+                    $version = is_string($existing) ? $existing : $version;
+                }
             }
             $parts[] = $tag . '=' . $version;
         }
 
-        $taggedKey = 'tag.' . hash('xxh128', implode('|', $parts)) . '.' . $key;
-        if (strlen($taggedKey) > KeyValidator::MAX_LENGTH) {
+        return 'tag.' . hash('xxh128', implode('|', $parts)) . '.';
+    }
+
+    /**
+     * @internal Used by TaggedCache.
+     */
+    public static function namespacedKey(string $namespace, string $key): string
+    {
+        KeyValidator::assert($key);
+
+        $namespaced = $namespace . $key;
+        if (strlen($namespaced) > KeyValidator::MAX_LENGTH) {
             throw new InvalidArgument(sprintf(
                 'Cache key is too long to be used with tags (max %d bytes)',
-                KeyValidator::MAX_LENGTH - 38
+                KeyValidator::MAX_LENGTH - strlen($namespace)
             ));
         }
 
-        return $taggedKey;
+        return $namespaced;
     }
 
     /**
@@ -601,7 +695,9 @@ final class MultiTierCache implements CacheInterface
 
     /**
      * @param callable(): mixed $producer
-     * @param array{value: mixed, stale: bool, within_swr: bool, within_sei: bool}|null $stale
+     * @param array{
+     *   value: mixed, stale: bool, within_swr: bool, within_sei: bool, expires: int, swr: int, sei: int
+     * }|null $stale
      */
     private function computeWithLock(
         string $key,
@@ -657,6 +753,44 @@ final class MultiTierCache implements CacheInterface
                 $lock->release();
             }
         }
+    }
+
+    /**
+     * Run $operation while holding the atomic-operation lock of $key.
+     *
+     * @template T
+     * @param callable(): T $operation
+     * @return T|false false when the lock could not be acquired or the operation failed
+     */
+    private function atomically(string $key, callable $operation): mixed
+    {
+        $lock = $this->locks->create(self::ATOMIC_LOCK_PREFIX . $key);
+
+        try {
+            if (!$lock->acquire(true, $this->lockTimeout)) {
+                $this->log('warning', 'Could not acquire lock for atomic operation on key {key}', ['key' => $key]);
+                return false;
+            }
+        } catch (Throwable $e) {
+            $this->failure('warning', 'Failed to acquire lock for key {key}', $key, $e);
+            return false;
+        }
+
+        try {
+            return $operation();
+        } catch (Throwable $e) {
+            $this->failure('error', 'Atomic operation failed for key {key}', $key, $e);
+            return false;
+        } finally {
+            $lock->release();
+        }
+    }
+
+    private function atomicExpiry(null|int|DateInterval $ttl): int
+    {
+        $seconds = $this->resolveTtl($ttl);
+
+        return $seconds > 0 ? $this->now() + $seconds : 0;
     }
 
     private function storeComputed(string $key, mixed $value, int $seconds, int $swr, int $sei): void
@@ -732,7 +866,9 @@ final class MultiTierCache implements CacheInterface
      * to the tiers above them.
      *
      * @param list<string> $keys
-     * @return array<string, array{value: mixed, stale: bool, within_swr: bool, within_sei: bool}>
+     * @return array<string, array{
+     *   value: mixed, stale: bool, within_swr: bool, within_sei: bool, expires: int, swr: int, sei: int
+     * }>
      */
     private function lookup(array $keys, bool $allowStale, bool $withValue = true, bool $backfill = true): array
     {
@@ -800,6 +936,9 @@ final class MultiTierCache implements CacheInterface
                 'stale' => $expired,
                 'within_swr' => $expired && $record['swr'] > 0 && $now < $record['e'] + $record['swr'],
                 'within_sei' => $expired && $record['sei'] > 0 && $now < $record['e'] + $record['sei'],
+                'expires' => $record['e'],
+                'swr' => $record['swr'],
+                'sei' => $record['sei'],
             ];
         }
 
