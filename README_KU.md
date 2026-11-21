@@ -14,7 +14,7 @@
 - 🎯 یەکخستنی تەواو لەگەڵ **Laravel**: Service Provider، Facade و فەرمانەکانی artisan
 - ✅ تاقیکراوەتەوە لەسەر File، SQLite، MySQL، PostgreSQL، Redis (phpredis و Predis) و APCu
 
-> وەشان: **v4.0.0** (لە گەشەپێداندا) — پێویستی بە **PHP 8.3+** و `psr/simple-cache` ی `^3` هەیە
+> وەشان: **v4.0.0** — پێویستی بە **PHP 8.3+** و `psr/simple-cache` ی `^3` هەیە
 > لە 3.x بەرز دەکەیتەوە؟ [MIGRATION.md](MIGRATION.md) بخوێنەوە.
 
 ---

@@ -14,7 +14,7 @@
 - 🎯 یکپارچه‌سازی کامل با **Laravel**: Service Provider، Facade و دستورات artisan
 - ✅ تست‌شده روی File، SQLite، MySQL، PostgreSQL، Redis (phpredis و Predis) و APCu
 
-> نسخه: **v4.0.0** (در حال توسعه) — نیازمند **PHP 8.3+** و `psr/simple-cache` نسخهٔ `^3`
+> نسخه: **v4.0.0** — نیازمند **PHP 8.3+** و `psr/simple-cache` نسخهٔ `^3`
 > از 3.x ارتقا می‌دهید؟ [MIGRATION.md](MIGRATION.md) را بخوانید.
 
 ---

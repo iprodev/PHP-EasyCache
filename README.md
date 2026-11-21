@@ -14,7 +14,7 @@
 - 🎯 First‑class **Laravel** integration: Service Provider, Facade and artisan commands
 - ✅ Tested against File, SQLite, MySQL, PostgreSQL, Redis (phpredis + Predis) and APCu
 
-> Version: **v4.0.0** (in development) — Requires **PHP 8.3+** and `psr/simple-cache` `^3`.
+> Version: **v4.0.0** — Requires **PHP 8.3+** and `psr/simple-cache` `^3`.
 > Upgrading from 3.x? Read [MIGRATION.md](MIGRATION.md).
 
 📖 **Documentation in other languages:**
