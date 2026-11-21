@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Iprodev\EasyCache\Lock;
 
 use Iprodev\EasyCache\Support\Environment;
-use Iprodev\EasyCache\Util\Lock;
 
 /**
  * Creates flock() based locks in a directory.
@@ -50,7 +49,7 @@ final class FileLockProvider implements LockProviderInterface
             return new UnavailableLock();
         }
 
-        return new Lock($this->directory . '/' . hash('xxh128', $key) . '.lock');
+        return new FileLock($this->directory . '/' . hash('xxh128', $key) . '.lock');
     }
 
     private function isUsable(): bool

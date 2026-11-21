@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Iprodev\EasyCache\Tests\Cache;
 
 use Iprodev\EasyCache\Cache\MultiTierCache;
+use Iprodev\EasyCache\Cache\RefreshMode;
 use Iprodev\EasyCache\Clock\FrozenClock;
-use Iprodev\EasyCache\Exceptions\InvalidArgument;
 use Iprodev\EasyCache\Lock\FileLockProvider;
 use Iprodev\EasyCache\Lock\LockInterface;
 use Iprodev\EasyCache\Lock\LockProviderInterface;
@@ -39,7 +39,7 @@ class SwrTest extends TestCase
 
     private function makeCache(int $defaultTtl, LockProviderInterface $locks): MultiTierCache
     {
-        return new MultiTierCache([$this->storage], null, null, $defaultTtl, null, null, $this->clock, null, $locks);
+        return new MultiTierCache([$this->storage], defaultTtl: $defaultTtl, clock: $this->clock, lockProvider: $locks);
     }
 
     private function producer(): callable
@@ -69,7 +69,7 @@ class SwrTest extends TestCase
         $this->cache->getOrSetSWR('k', $this->producer(), 10, 30);
         $this->clock->advance(15); // expired, inside the SWR window
 
-        $this->assertSame('v2', $this->cache->getOrSetSWR('k', $this->producer(), 10, 30, 0, ['mode' => 'sync']));
+        $this->assertSame('v2', $this->cache->getOrSetSWR('k', $this->producer(), 10, 30, 0, RefreshMode::Sync));
         $this->assertSame(2, $this->calls);
         $this->assertSame('v2', $this->cache->getOrSetSWR('k', $this->producer(), 10, 30));
         $this->assertSame(2, $this->calls);
@@ -183,13 +183,7 @@ class SwrTest extends TestCase
         }
         $this->cache->getOrSetSWR('k', $this->producer(), 10, 30);
         $this->clock->advance(15);
-        $this->assertSame('v2', $this->cache->getOrSetSWR('k', $this->producer(), 10, 30, 0, ['mode' => 'defer']));
-    }
-
-    public function testInvalidModeThrows(): void
-    {
-        $this->expectException(InvalidArgument::class);
-        $this->cache->getOrSetSWR('k', $this->producer(), 10, 30, 0, ['mode' => 'async']);
+        $this->assertSame('v2', $this->cache->getOrSetSWR('k', $this->producer(), 10, 30, 0, RefreshMode::Defer));
     }
 
     public function testUnavailableLockStillCachesTheResult(): void

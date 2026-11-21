@@ -88,15 +88,14 @@ final class EasyCacheServiceProvider extends ServiceProvider
 
         return new MultiTierCache(
             $tiers,
-            $this->makeSerializer((array) ($cfg['serializer'] ?? [])),
-            $this->makeCompressor((array) ($cfg['compressor'] ?? [])),
-            (int) ($cfg['default_ttl'] ?? 600),
-            $logger,
-            null,
-            null,
-            $this->signingKey($cfg, $app),
-            $this->makeLockProvider($lockCfg, $cfg, $logger),
-            (float) ($lockCfg['timeout'] ?? 30)
+            serializer: $this->makeSerializer((array) ($cfg['serializer'] ?? [])),
+            compressor: $this->makeCompressor((array) ($cfg['compressor'] ?? [])),
+            defaultTtl: (int) ($cfg['default_ttl'] ?? 600),
+            logger: $logger,
+            signingKey: $this->signingKey($cfg, $app),
+            lockProvider: $this->makeLockProvider($lockCfg, $cfg, $logger),
+            lockTimeout: (float) ($lockCfg['timeout'] ?? 30),
+            allowUnsignedObjects: (bool) ($cfg['allow_unsigned_objects'] ?? false),
         );
     }
 

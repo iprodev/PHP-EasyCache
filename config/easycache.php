@@ -38,6 +38,14 @@ return [
     'sign' => (bool) $env('EASYCACHE_SIGN', true),
     'signing_key' => $env('EASYCACHE_SIGNING_KEY'),
 
+    /*
+    | The php serializer below may create objects (allowed_classes). That is
+    | only safe for signed entries, so EasyCache refuses to start with signing
+    | disabled unless this is enabled. Enable it only if nobody else can write
+    | to any configured cache backend.
+    */
+    'allow_unsigned_objects' => (bool) $env('EASYCACHE_ALLOW_UNSIGNED_OBJECTS', false),
+
     'lock' => [
         'driver' => $env('EASYCACHE_LOCK_DRIVER', 'file'), // file|redis|none
         'path' => $env('EASYCACHE_LOCK_PATH') ?: $storage('framework/cache/easycache-locks'),
@@ -81,8 +89,8 @@ return [
 
     'serializer' => [
         'driver' => $env('EASYCACHE_SERIALIZER', 'php'), // php|json
-        // For the php serializer: true = any class, false = no objects,
-        // or a list of class names that may be unserialized.
+        // For the php serializer: true = any class (entries are signed by
+        // default, see "sign"), false = no objects, or a list of class names.
         'allowed_classes' => true,
     ],
 

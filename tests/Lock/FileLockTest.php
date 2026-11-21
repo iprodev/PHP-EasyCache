@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Tests\Lock;
 
+use Iprodev\EasyCache\Lock\FileLock;
 use Iprodev\EasyCache\Lock\FileLockProvider;
 use Iprodev\EasyCache\Lock\UnavailableLock;
 use Iprodev\EasyCache\Tests\Support\TempDirectory;
-use Iprodev\EasyCache\Util\Lock;
 use PHPUnit\Framework\TestCase;
 
 class FileLockTest extends TestCase
@@ -30,7 +30,7 @@ class FileLockTest extends TestCase
     public function testAcquireAndReleaseRemovesTheLockFile(): void
     {
         $path = $this->lockDir . '/test.lock';
-        $lock = new Lock($path);
+        $lock = new FileLock($path);
 
         $this->assertTrue($lock->acquire());
         $this->assertFileExists($path);
@@ -45,8 +45,8 @@ class FileLockTest extends TestCase
     public function testNonBlockingLock(): void
     {
         $path = $this->lockDir . '/nonblocking.lock';
-        $lock1 = new Lock($path);
-        $lock2 = new Lock($path);
+        $lock1 = new FileLock($path);
+        $lock2 = new FileLock($path);
 
         $this->assertTrue($lock1->acquire(false));
         $this->assertFalse($lock2->acquire(false));
@@ -59,11 +59,11 @@ class FileLockTest extends TestCase
     public function testBlockingAcquireTimesOut(): void
     {
         $path = $this->lockDir . '/timeout.lock';
-        $holder = new Lock($path);
+        $holder = new FileLock($path);
         $this->assertTrue($holder->acquire());
 
         $start = microtime(true);
-        $this->assertFalse((new Lock($path))->acquire(true, 0.2));
+        $this->assertFalse((new FileLock($path))->acquire(true, 0.2));
         $elapsed = microtime(true) - $start;
 
         $this->assertGreaterThanOrEqual(0.19, $elapsed);
@@ -74,12 +74,12 @@ class FileLockTest extends TestCase
     public function testReacquireAfterHolderRemovedTheFile(): void
     {
         $path = $this->lockDir . '/inode.lock';
-        $first = new Lock($path);
+        $first = new FileLock($path);
         $this->assertTrue($first->acquire());
         $first->release(); // removes the file
 
-        $second = new Lock($path);
-        $third = new Lock($path);
+        $second = new FileLock($path);
+        $third = new FileLock($path);
         $this->assertTrue($second->acquire(false));
         $this->assertFalse($third->acquire(false), 'the lock must still be exclusive after file removal');
         $second->release();
@@ -88,18 +88,18 @@ class FileLockTest extends TestCase
     public function testAutomaticReleaseOnDestruct(): void
     {
         $path = $this->lockDir . '/destruct.lock';
-        $lock1 = new Lock($path);
+        $lock1 = new FileLock($path);
         $this->assertTrue($lock1->acquire());
         unset($lock1);
 
-        $lock2 = new Lock($path);
+        $lock2 = new FileLock($path);
         $this->assertTrue($lock2->acquire(false));
         $lock2->release();
     }
 
     public function testRepeatedAcquireAndRelease(): void
     {
-        $lock = new Lock($this->lockDir . '/repeated.lock');
+        $lock = new FileLock($this->lockDir . '/repeated.lock');
         for ($i = 0; $i < 10; $i++) {
             $this->assertTrue($lock->acquire());
             $this->assertTrue($lock->acquire(), 'acquiring a held lock again is a no-op');
@@ -113,7 +113,7 @@ class FileLockTest extends TestCase
         $link = $this->lockDir . '/link.lock';
         symlink($target, $link);
 
-        $this->assertFalse((new Lock($link))->acquire(false));
+        $this->assertFalse((new FileLock($link))->acquire(false));
         $this->assertFileDoesNotExist($target);
     }
 

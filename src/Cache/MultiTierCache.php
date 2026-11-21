@@ -16,7 +16,7 @@ use Iprodev\EasyCache\Lock\FileLockProvider;
 use Iprodev\EasyCache\Lock\LockProviderInterface;
 use Iprodev\EasyCache\Serialization\NativeSerializer;
 use Iprodev\EasyCache\Serialization\SerializerInterface;
-use Iprodev\EasyCache\Storage\BatchStorageInterface;
+use Iprodev\EasyCache\Storage\PrunableStorageInterface;
 use Iprodev\EasyCache\Storage\StorageInterface;
 use Iprodev\EasyCache\Util\KeyValidator;
 use Psr\Clock\ClockInterface;
@@ -38,15 +38,17 @@ use Throwable;
  *
  * The header is parsed with unpack(), never with unserialize(), so reading an
  * entry cannot instantiate objects unless the configured serializer does so.
+ * Serializers that can (SerializerInterface::allowsObjects()) require a
+ * signing key, so that only entries written by this application are read.
  */
-class MultiTierCache implements CacheInterface
+final class MultiTierCache implements CacheInterface
 {
-    private const MAGIC = 'EC03';
-    private const FLAG_SIGNED = 1;
-    private const FIXED_HEADER_LENGTH = 21; // magic(4) + flags(1) + expires(8) + swr(4) + sei(4)
-    private const MAC_LENGTH = 32;
-    private const MAX_WINDOW = 4294967295;
-    private const TAG_VERSION_PREFIX = '__ec_tag.';
+    private const string MAGIC = 'EC03';
+    private const int FLAG_SIGNED = 1;
+    private const int FIXED_HEADER_LENGTH = 21; // magic(4) + flags(1) + expires(8) + swr(4) + sei(4)
+    private const int MAC_LENGTH = 32;
+    private const int MAX_WINDOW = 4294967295;
+    private const string TAG_VERSION_PREFIX = '__ec_tag.';
 
     /** @var list<StorageInterface> */
     private array $tiers;
@@ -77,17 +79,22 @@ class MultiTierCache implements CacheInterface
     ];
 
     /**
-     * @param StorageInterface[]         $tiers        Read/write order; tier[0] is the fastest
-     * @param SerializerInterface|null   $serializer   Defaults to NativeSerializer
-     * @param CompressorInterface|null   $compressor   Defaults to NullCompressor
-     * @param int                        $defaultTtl   TTL in seconds when none is given (0 = never expire)
-     * @param LoggerInterface|null       $logger       PSR-3 logger, also handed to tiers without one
-     * @param string|null                $lockPath     Directory for file locks (ignored with $lockProvider)
-     * @param ClockInterface|null        $clock        PSR-20 clock (defaults to the system clock)
-     * @param string|null                $signingKey   Secret (>= 16 bytes) used to sign entries with HMAC-SHA256;
-     *                                                 unsigned or tampered entries are then rejected
-     * @param LockProviderInterface|null $lockProvider Lock implementation (defaults to file locks)
-     * @param float                      $lockTimeout  Seconds to wait for a lock before computing without it
+     * Arguments after $logger are best passed by name (or use builder()).
+     *
+     * @param StorageInterface[]         $tiers         Read/write order; tier[0] is the fastest
+     * @param SerializerInterface|null   $serializer    Defaults to NativeSerializer without objects
+     * @param CompressorInterface|null   $compressor    Defaults to NullCompressor
+     * @param int                        $defaultTtl    TTL in seconds when none is given (0 = never expire)
+     * @param LoggerInterface|null       $logger        PSR-3 logger, also handed to tiers without one
+     * @param ClockInterface|null        $clock         PSR-20 clock (defaults to the system clock)
+     * @param string|null                $signingKey    Secret (>= 16 bytes) used to sign entries with HMAC-SHA256;
+     *                                                  unsigned or tampered entries are then rejected
+     * @param LockProviderInterface|null $lockProvider  Lock implementation (defaults to file locks in a
+     *                                                  private per-user temp directory)
+     * @param float                      $lockTimeout   Seconds to wait for a lock before computing without it
+     * @param bool                       $allowUnsignedObjects Allow a serializer that can create objects
+     *                                                  without a signing key. Only safe when nobody else
+     *                                                  can write to any of the tiers.
      */
     public function __construct(
         array $tiers,
@@ -95,11 +102,11 @@ class MultiTierCache implements CacheInterface
         ?CompressorInterface $compressor = null,
         int $defaultTtl = 3600,
         ?LoggerInterface $logger = null,
-        ?string $lockPath = null,
         ?ClockInterface $clock = null,
         ?string $signingKey = null,
         ?LockProviderInterface $lockProvider = null,
-        float $lockTimeout = 30.0
+        float $lockTimeout = 30.0,
+        bool $allowUnsignedObjects = false
     ) {
         if ($tiers === []) {
             throw new InvalidArgumentException('At least one storage tier is required.');
@@ -120,11 +127,19 @@ class MultiTierCache implements CacheInterface
         $this->logger = $logger;
         $this->clock = $clock ?? new SystemClock();
         $this->signingKey = $signingKey;
-        $this->locks = $lockProvider ?? new FileLockProvider($lockPath);
+        $this->locks = $lockProvider ?? new FileLockProvider();
         $this->lockTimeout = max(0.0, $lockTimeout);
 
         self::assertName($this->serializer->name(), 'Serializer');
         self::assertName($this->compressor->name(), 'Compressor');
+
+        if ($this->serializer->allowsObjects() && $signingKey === null && !$allowUnsignedObjects) {
+            throw new InvalidArgumentException(
+                'The configured serializer can create PHP objects, which is only safe with trusted cache data. '
+                . 'Pass a signingKey (recommended), restrict NativeSerializer allowedClasses to false, '
+                . 'or set allowUnsignedObjects: true if nobody else can write to any cache tier.'
+            );
+        }
 
         if ($logger !== null) {
             foreach ($this->tiers as $tier) {
@@ -136,6 +151,14 @@ class MultiTierCache implements CacheInterface
                 }
             }
         }
+    }
+
+    /**
+     * Fluent alternative to the constructor.
+     */
+    public static function builder(): CacheBuilder
+    {
+        return new CacheBuilder();
     }
 
     // ---------------------------------------------------------------------
@@ -278,13 +301,7 @@ class MultiTierCache implements CacheInterface
         $ttlSeconds = $this->physicalTtl($expires, 0, 0);
         foreach ($this->tiers as $i => $tier) {
             try {
-                if ($tier instanceof BatchStorageInterface) {
-                    $ok = $tier->setMany($payloads, $ttlSeconds) && $ok;
-                } else {
-                    foreach ($payloads as $key => $payload) {
-                        $ok = $tier->set((string) $key, $payload, $ttlSeconds) && $ok;
-                    }
-                }
+                $ok = $tier->setMany($payloads, $ttlSeconds) && $ok;
             } catch (Throwable $e) {
                 $this->failure('warning', "setMultiple failed on tier {$i}", null, $e);
                 $ok = false;
@@ -308,13 +325,7 @@ class MultiTierCache implements CacheInterface
         $ok = true;
         foreach ($this->tiers as $i => $tier) {
             try {
-                if ($tier instanceof BatchStorageInterface) {
-                    $ok = $tier->deleteMany($list) && $ok;
-                } else {
-                    foreach ($list as $key) {
-                        $ok = $tier->delete($key) && $ok;
-                    }
-                }
+                $ok = $tier->deleteMany($list) && $ok;
             } catch (Throwable $e) {
                 $this->failure('warning', "deleteMultiple failed on tier {$i}", null, $e);
                 $ok = false;
@@ -346,10 +357,10 @@ class MultiTierCache implements CacheInterface
      *
      * - Fresh entry: returned as is.
      * - Expired but within $swrSeconds: the stale value is served while the
-     *   entry is refreshed. In "sync" mode the process that wins the lock
-     *   refreshes right away and returns the new value (others get the stale
-     *   value without waiting); in "defer" mode the refresh runs after the
-     *   response has been sent (PHP-FPM/LiteSpeed; elsewhere falls back to sync).
+     *   entry is refreshed. With RefreshMode::Sync the process that wins the
+     *   lock refreshes right away and returns the new value (others get the
+     *   stale value without waiting); with RefreshMode::Defer the refresh runs
+     *   after the response has been sent (PHP-FPM/LiteSpeed; elsewhere Sync).
      * - Expired but within $staleIfErrorSeconds: recomputed; if the producer
      *   throws, the stale value is returned instead of the exception.
      * - Missing: computed under a per-key lock so concurrent requests do not
@@ -357,8 +368,7 @@ class MultiTierCache implements CacheInterface
      *
      * A null TTL uses the default TTL; a TTL <= 0 computes the value without caching it.
      *
-     * @param callable(): mixed  $producer
-     * @param array{mode?: string} $options 'mode' => 'sync'|'defer'
+     * @param callable(): mixed $producer
      */
     public function getOrSetSWR(
         string $key,
@@ -366,14 +376,9 @@ class MultiTierCache implements CacheInterface
         null|int|DateInterval $ttl = null,
         int $swrSeconds = 0,
         int $staleIfErrorSeconds = 0,
-        array $options = []
+        RefreshMode $mode = RefreshMode::Sync
     ): mixed {
         KeyValidator::assert($key);
-
-        $mode = $options['mode'] ?? 'sync';
-        if ($mode !== 'sync' && $mode !== 'defer') {
-            throw new InvalidArgument("Invalid SWR mode '{$mode}', expected 'sync' or 'defer'");
-        }
 
         $seconds = $this->resolveTtl($ttl);
         if ($ttl !== null && $seconds <= 0) {
@@ -398,7 +403,7 @@ class MultiTierCache implements CacheInterface
         if ($hit !== null && $hit['within_swr']) {
             $this->stats['stale_hits']++;
 
-            if ($mode === 'defer' && self::canDefer()) {
+            if ($mode === RefreshMode::Defer && self::canDefer()) {
                 $this->defer($key, function () use ($key, $producer, $seconds, $swr, $sei): void {
                     $this->revalidate($key, $producer, $seconds, $swr, $sei);
                 });
@@ -517,6 +522,9 @@ class MultiTierCache implements CacheInterface
     {
         $sum = 0;
         foreach ($this->tiers as $i => $tier) {
+            if (!$tier instanceof PrunableStorageInterface) {
+                continue;
+            }
             try {
                 $sum += $tier->prune();
             } catch (Throwable $e) {
@@ -820,7 +828,7 @@ class MultiTierCache implements CacheInterface
      */
     private function fetch(StorageInterface $tier, array $keys): array
     {
-        if (count($keys) > 1 && $tier instanceof BatchStorageInterface) {
+        if (count($keys) > 1) {
             return $tier->getMany($keys);
         }
 

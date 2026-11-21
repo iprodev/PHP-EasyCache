@@ -105,7 +105,6 @@ final class TaggedCache implements CacheInterface
 
     /**
      * @param callable(): mixed $producer
-     * @param array{mode?: string} $options
      */
     public function getOrSetSWR(
         string $key,
@@ -113,7 +112,7 @@ final class TaggedCache implements CacheInterface
         null|int|DateInterval $ttl = null,
         int $swrSeconds = 0,
         int $staleIfErrorSeconds = 0,
-        array $options = []
+        RefreshMode $mode = RefreshMode::Sync
     ): mixed {
         return $this->cache->getOrSetSWR(
             $this->key($key),
@@ -121,7 +120,7 @@ final class TaggedCache implements CacheInterface
             $ttl,
             $swrSeconds,
             $staleIfErrorSeconds,
-            $options
+            $mode
         );
     }
 

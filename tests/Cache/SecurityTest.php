@@ -36,14 +36,11 @@ class SecurityTest extends TestCase
     ): MultiTierCache {
         return new MultiTierCache(
             [$this->storage],
-            $serializer,
-            null,
-            3600,
-            $logger,
-            null,
-            $this->clock,
-            $key,
-            new NullLockProvider()
+            serializer: $serializer,
+            logger: $logger,
+            clock: $this->clock,
+            signingKey: $key,
+            lockProvider: new NullLockProvider()
         );
     }
 
@@ -79,10 +76,17 @@ class SecurityTest extends TestCase
     public function testNativeSerializerAllowedClassesBlocksObjectInjection(): void
     {
         $this->storage->rawSet('k', $this->forgeEntry('php', serialize(['x' => new WakeupProbe()])));
-        $value = $this->cache(new NativeSerializer(false))->get('k');
+        $value = $this->cache(new NativeSerializer(false))->get('k', 'miss');
 
         $this->assertSame(0, WakeupProbe::$wakeups);
-        $this->assertInstanceOf(\__PHP_Incomplete_Class::class, $value['x']);
+        $this->assertSame('miss', $value, 'entries with objects that are not allowed are misses');
+    }
+
+    public function testDefaultSerializerNeverInstantiatesObjects(): void
+    {
+        $this->storage->rawSet('k', $this->forgeEntry('php', serialize(new WakeupProbe())));
+        $this->assertSame('miss', $this->cache()->get('k', 'miss'));
+        $this->assertSame(0, WakeupProbe::$wakeups);
     }
 
     public function testSignedEntriesRoundTrip(): void

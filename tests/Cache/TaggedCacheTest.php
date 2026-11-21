@@ -20,14 +20,8 @@ class TaggedCacheTest extends TestCase
         $clock = new FrozenClock();
         $this->cache = new MultiTierCache(
             [new ArrayStorage($clock)],
-            null,
-            null,
-            3600,
-            null,
-            null,
-            $clock,
-            null,
-            new NullLockProvider()
+            clock: $clock,
+            lockProvider: new NullLockProvider()
         );
     }
 

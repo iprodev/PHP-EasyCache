@@ -26,17 +26,17 @@
     }
   ],
   "require": {
-    "php": "^8.1",
+    "php": "^8.3",
     "psr/clock": "^1.0",
-    "psr/log": "^1.1 || ^2.0 || ^3.0",
-    "psr/simple-cache": "^2.0 || ^3.0"
+    "psr/log": "^2.0 || ^3.0",
+    "psr/simple-cache": "^3.0"
   },
   "provide": {
-    "psr/simple-cache-implementation": "2.0 || 3.0"
+    "psr/simple-cache-implementation": "3.0"
   },
   "require-dev": {
     "phpstan/phpstan": "^2.1",
-    "phpunit/phpunit": "^10.5 || ^11.5",
+    "phpunit/phpunit": "^11.5 || ^12.0",
     "predis/predis": "^2.0",
     "squizlabs/php_codesniffer": "^3.9"
   },
@@ -47,7 +47,7 @@
     "ext-zlib": "To use GzipCompressor for data compression",
     "ext-zstd": "To use ZstdCompressor for faster data compression",
     "monolog/monolog": "^3.0 - For comprehensive logging support",
-    "illuminate/support": "^10.0 || ^11.0 || ^12.0 - For the Laravel service provider, facade and artisan commands"
+    "illuminate/support": "^12.0 || ^13.0 - For the Laravel service provider, facade and artisan commands"
   },
   "autoload": {
     "psr-4": {

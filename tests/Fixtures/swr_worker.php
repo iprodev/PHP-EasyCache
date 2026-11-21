@@ -6,11 +6,12 @@ declare(strict_types=1);
 require $argv[1];
 
 use Iprodev\EasyCache\Cache\MultiTierCache;
+use Iprodev\EasyCache\Lock\FileLockProvider;
 use Iprodev\EasyCache\Storage\FileStorage;
 
 [, , $cacheDir, $lockDir, $counter] = $argv;
 
-$cache = new MultiTierCache([new FileStorage($cacheDir)], null, null, 3600, null, $lockDir);
+$cache = new MultiTierCache([new FileStorage($cacheDir)], lockProvider: new FileLockProvider($lockDir));
 
 $value = $cache->getOrSetSWR('shared', function () use ($counter): string {
     file_put_contents($counter, "x", FILE_APPEND | LOCK_EX);

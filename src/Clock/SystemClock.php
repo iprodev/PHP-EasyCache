@@ -10,7 +10,7 @@ use Psr\Clock\ClockInterface;
 /**
  * PSR-20 clock backed by the system time.
  */
-final class SystemClock implements ClockInterface
+final readonly class SystemClock implements ClockInterface
 {
     public function now(): DateTimeImmutable
     {

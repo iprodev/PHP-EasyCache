@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Iprodev\EasyCache\Tests\Storage;
 
 use Iprodev\EasyCache\Clock\FrozenClock;
-use Iprodev\EasyCache\Storage\BatchStorageInterface;
+use Iprodev\EasyCache\Storage\PrunableStorageInterface;
 use Iprodev\EasyCache\Storage\StorageInterface;
 use PHPUnit\Framework\TestCase;
 
@@ -148,10 +148,6 @@ abstract class StorageContractTestCase extends TestCase
 
     public function testBatchOperations(): void
     {
-        if (!$this->storage instanceof BatchStorageInterface) {
-            $this->markTestSkipped('Storage does not support batch operations');
-        }
-
         $this->assertTrue($this->storage->setMany(['a' => '1', 'b' => '2', '123' => '3'], 60));
         $found = $this->storage->getMany(['a', 'b', '123', 'missing']);
         ksort($found, SORT_STRING);
@@ -164,6 +160,9 @@ abstract class StorageContractTestCase extends TestCase
 
     public function testPruneReturnsCount(): void
     {
+        if (!$this->storage instanceof PrunableStorageInterface) {
+            $this->markTestSkipped('The backend expires entries on its own');
+        }
         $this->storage->set('keep', 'payload', 0);
         $this->assertGreaterThanOrEqual(0, $this->storage->prune());
         $this->assertSame('payload', $this->storage->get('keep'));

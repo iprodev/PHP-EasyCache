@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Lock;
 
-use Iprodev\EasyCache\Support\RedisClient;
+use Iprodev\EasyCache\Support\Redis\RedisConnection;
 use Throwable;
 
 /**
@@ -13,24 +13,15 @@ use Throwable;
  */
 final class RedisLock implements LockInterface
 {
-    private const RELEASE_SCRIPT = <<<'LUA'
-if redis.call("get", KEYS[1]) == ARGV[1] then
-    return redis.call("del", KEYS[1])
-end
-return 0
-LUA;
-
-    private object $redis;
-    private string $key;
-    private int $ttlMs;
     private ?string $token = null;
+    private readonly RedisConnection $redis;
 
-    public function __construct(object $redis, string $key, int $ttlMs)
+    /**
+     * @param object $redis A \Redis (phpredis) or \Predis\ClientInterface instance
+     */
+    public function __construct(object $redis, private readonly string $key, private readonly int $ttlMs)
     {
-        RedisClient::assertSupported($redis);
-        $this->redis = $redis;
-        $this->key = $key;
-        $this->ttlMs = $ttlMs;
+        $this->redis = $redis instanceof RedisConnection ? $redis : RedisConnection::wrap($redis);
     }
 
     public function acquire(bool $blocking = true, ?float $timeout = null): bool
@@ -40,22 +31,25 @@ LUA;
         }
 
         // Waiting longer than the lock TTL is pointless: the lock expires by then.
-        $timeout = $timeout ?? ($this->ttlMs / 1000);
-        $deadline = microtime(true) + max(0.0, $timeout);
+        $deadline = microtime(true) + max(0.0, $timeout ?? $this->ttlMs / 1000);
         $sleep = 5000;
 
-        do {
+        while (true) {
             $token = bin2hex(random_bytes(16));
-            if ($this->trySet($token)) {
-                $this->token = $token;
-                return true;
+            try {
+                if ($this->redis->setIfAbsent($this->key, $token, $this->ttlMs)) {
+                    $this->token = $token;
+                    return true;
+                }
+            } catch (Throwable) {
+                return false;
             }
             if (!$blocking || microtime(true) >= $deadline) {
                 return false;
             }
             usleep($sleep);
             $sleep = min($sleep * 2, 100000);
-        } while (true);
+        }
     }
 
     public function release(): void
@@ -68,14 +62,7 @@ LUA;
         $this->token = null;
 
         try {
-            if (RedisClient::isPhpRedis($this->redis)) {
-                /** @var \Redis $redis */
-                $redis = $this->redis;
-                $redis->eval(self::RELEASE_SCRIPT, [$this->key, $token], 1);
-            } else {
-                /** @phpstan-ignore-next-line Predis magic method */
-                $this->redis->eval(self::RELEASE_SCRIPT, 1, $this->key, $token);
-            }
+            $this->redis->deleteIfEquals($this->key, $token);
         } catch (Throwable) {
             // The lock expires on its own after its TTL.
         }
@@ -84,23 +71,5 @@ LUA;
     public function __destruct()
     {
         $this->release();
-    }
-
-    private function trySet(string $token): bool
-    {
-        try {
-            if (RedisClient::isPhpRedis($this->redis)) {
-                /** @var \Redis $redis */
-                $redis = $this->redis;
-                return (bool) $redis->set($this->key, $token, ['nx', 'px' => $this->ttlMs]);
-            }
-
-            /** @phpstan-ignore-next-line Predis magic method */
-            $result = $this->redis->set($this->key, $token, 'PX', $this->ttlMs, 'NX');
-
-            return $result !== null && (string) $result === 'OK';
-        } catch (Throwable) {
-            return false;
-        }
     }
 }

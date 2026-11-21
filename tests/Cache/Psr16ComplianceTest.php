@@ -6,6 +6,7 @@ namespace Iprodev\EasyCache\Tests\Cache;
 
 use Iprodev\EasyCache\Cache\MultiTierCache;
 use Iprodev\EasyCache\Lock\NullLockProvider;
+use Iprodev\EasyCache\Serialization\NativeSerializer;
 use Iprodev\EasyCache\Storage\FileStorage;
 use Iprodev\EasyCache\Storage\PdoStorage;
 use Iprodev\EasyCache\Tests\Support\TempDirectory;
@@ -45,7 +46,12 @@ class Psr16ComplianceTest extends TestCase
             $storage = new FileStorage($this->makeTempDir());
         }
 
-        return new MultiTierCache([$storage], null, null, 3600, null, null, null, null, new NullLockProvider());
+        return new MultiTierCache(
+            [$storage],
+            serializer: new NativeSerializer([\stdClass::class]),
+            signingKey: str_repeat('k', 32),
+            lockProvider: new NullLockProvider()
+        );
     }
 
     /**

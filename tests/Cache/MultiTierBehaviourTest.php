@@ -25,7 +25,7 @@ class MultiTierBehaviourTest extends TestCase
      */
     private function cache(array $tiers): MultiTierCache
     {
-        return new MultiTierCache($tiers, null, null, 3600, null, null, $this->clock, null, new NullLockProvider());
+        return new MultiTierCache($tiers, clock: $this->clock, lockProvider: new NullLockProvider());
     }
 
     public function testWritesGoToAllTiers(): void
