@@ -255,7 +255,8 @@ $cache->getOrSetSWR(
 Use defer mode for better response times:
 
 ```php
-// Sync mode: ~100ms (includes refresh)
+// Sync mode: the one request that refreshes pays for expensiveCall() and gets
+// the new value; concurrent requests get the stale value immediately
 $data = $cache->getOrSetSWR(
     'key',
     fn() => expensiveCall(),  // 50ms
@@ -263,14 +264,30 @@ $data = $cache->getOrSetSWR(
     ['mode' => 'sync']
 );
 
-// Defer mode: ~1ms (serves stale, refreshes after response)
+// Defer mode: ~1ms for everyone (serves stale, refreshes after the response)
 $data = $cache->getOrSetSWR(
     'key',
     fn() => expensiveCall(),  // Runs after response
     300, 60, 300,
-    ['mode' => 'defer']  // Requires fastcgi_finish_request()
+    ['mode' => 'defer']  // Needs fastcgi_finish_request() (PHP-FPM) or LiteSpeed, otherwise falls back to sync
 );
 ```
+
+### Batch Operations
+
+`getMultiple()`, `setMultiple()` and `deleteMultiple()` use one round trip per
+tier (`MGET`/pipelines on Redis, `apcu_fetch([...])`, `WHERE k IN (...)` on
+PDO). Prefer them to loops of `get()`:
+
+```php
+// 1 round trip per tier instead of 100
+$users = $cache->getMultiple(array_map(fn ($id) => "user_{$id}", $ids));
+```
+
+### Signing Overhead
+
+HMAC-SHA256 signing (`signingKey`) costs a few microseconds per entry and adds
+32 bytes to each entry; it is negligible compared to a network round trip.
 
 ---
 

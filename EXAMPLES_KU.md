@@ -474,7 +474,7 @@ class CacheResponse
 {
     public function handle($request, Closure $next, $ttl = 300)
     {
-        $key = 'route:' . $request->path();
+        $key = 'route.' . sha1($request->path()) // ڕێڕەو / ی تێدایە;
 
         // پشکنینی cache
         if ($cached = EasyCache::get($key)) {
@@ -548,7 +548,7 @@ class RateLimiter
 
 // بەکارهێنان
 $limiter = new RateLimiter($cache, 100, 1);
-$key = 'api:' . $request->ip();
+$key = 'ratelimit.' . sha1($request->ip()) // IPv6 : ی تێدایە;
 
 if ($limiter->tooManyAttempts($key)) {
     die('زۆر داواکاری. تکایە دواتر هەوڵبدەرەوە.');
@@ -557,6 +557,8 @@ if ($limiter->tooManyAttempts($key)) {
 $limiter->hit($key);
 // بەردەوامبوونی داواکاری...
 ```
+
+> ⚠️ ئەم نموونەیە ئەتۆمی نییە (get و set جیان) و بۆ سنووری نزیکەیی گونجاوە. بۆ سنووری ورد `INCR` ی Redis بەکاربهێنە.
 
 ### Session Management
 
@@ -574,13 +576,13 @@ class CacheSessionHandler implements SessionHandlerInterface
 
     public function read($id): string
     {
-        return $this->cache->get("session:{$id}", '');
+        return $this->cache->get("session.{$id}", '');
     }
 
     public function write($id, $data): bool
     {
         return $this->cache->set(
-            "session:{$id}",
+            "session.{$id}",
             $data,
             $this->minutes * 60
         );
@@ -588,7 +590,7 @@ class CacheSessionHandler implements SessionHandlerInterface
 
     public function destroy($id): bool
     {
-        return $this->cache->delete("session:{$id}");
+        return $this->cache->delete("session.{$id}");
     }
 
     public function gc($max_lifetime): int|false
@@ -650,74 +652,23 @@ echo $fragment->remember('sidebar_menu', 3600, function() {
 
 ### Cache Tags (Grouped Cache)
 
+لە وەشانی 3.1 ەوە tag ەکان لەناو کتێبخانەکەدا جێبەجێ کراون:
+
 ```php
-class TaggedCache
-{
-    private $cache;
-
-    public function __construct(MultiTierCache $cache)
-    {
-        $this->cache = $cache;
-    }
-
-    public function tags(array $tags): self
-    {
-        $this->currentTags = $tags;
-        return $this;
-    }
-
-    public function put(string $key, $value, int $ttl): bool
-    {
-        $taggedKey = $this->taggedKey($key);
-        
-        // هەڵگرتنی کلیل لە لیستی هەر tag
-        foreach ($this->currentTags as $tag) {
-            $tagKeys = $this->cache->get("tag:{$tag}", []);
-            $tagKeys[] = $key;
-            $this->cache->set("tag:{$tag}", array_unique($tagKeys), 0);
-        }
-
-        return $this->cache->set($taggedKey, $value, $ttl);
-    }
-
-    public function get(string $key)
-    {
-        return $this->cache->get($this->taggedKey($key));
-    }
-
-    public function flush(): void
-    {
-        foreach ($this->currentTags as $tag) {
-            $keys = $this->cache->get("tag:{$tag}", []);
-            foreach ($keys as $key) {
-                $this->cache->delete($this->taggedKey($key));
-            }
-            $this->cache->delete("tag:{$tag}");
-        }
-    }
-
-    private function taggedKey(string $key): string
-    {
-        $tagString = implode('|', $this->currentTags);
-        return "tagged:{$tagString}:{$key}";
-    }
-
-    private $currentTags = [];
-}
-
-// بەکارهێنان
-$taggedCache = new TaggedCache($cache);
-
 // هەڵگرتن لەگەڵ tag
-$taggedCache->tags(['users', 'profiles'])->put('user_1', $userData, 3600);
-$taggedCache->tags(['users', 'profiles'])->put('user_2', $userData2, 3600);
+$cache->tags(['users', 'profiles'])->set('user_1', $userData, 3600);
+$cache->tags(['users', 'profiles'])->set('user_2', $userData2, 3600);
 
-// گەڕاندنەوە
-$user = $taggedCache->tags(['users', 'profiles'])->get('user_1');
+// گەڕاندنەوە (بە هەمان کۆمەڵە tag؛ ڕیزبەندی گرنگ نییە)
+$user = $cache->tags(['profiles', 'users'])->get('user_1');
 
-// پاککردنەوەی هەموو بڕگەکانی یەک tag
-$taggedCache->tags(['users'])->flush();
+// بەتاڵکردنەوەی هەموو بڕگەکانی tag ێک
+$cache->invalidateTags('users');
+// یان
+$cache->tags(['users'])->clear();
 ```
+
+بڕگە بەتاڵکراوەکان ناسڕدرێنەوە، تەنها چیتر دەستیان پێناگات و بە TTL ی خۆیان یان `prune()` لادەبرێن.
 
 ---
 
@@ -875,9 +826,9 @@ $cache->set('user', $data);
 $cache->set('product', $data);
 
 // باش
-$cache->set('user:profile:123', $data);
-$cache->set('product:details:456', $data);
-$cache->set('api:weather:sulaymaniyah', $data);
+$cache->set('user.profile.123', $data);
+$cache->set('product.details.456', $data);
+$cache->set('api.weather.sulaymaniyah', $data);
 ```
 
 ### 3. بەکارهێنانی SWR بۆ کارپێکردنە گرانەکان

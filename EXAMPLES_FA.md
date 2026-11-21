@@ -474,7 +474,7 @@ class CacheResponse
 {
     public function handle($request, Closure $next, $ttl = 300)
     {
-        $key = 'route:' . $request->path();
+        $key = 'route.' . sha1($request->path()) // مسیر شامل / است;
 
         // بررسی cache
         if ($cached = EasyCache::get($key)) {
@@ -548,7 +548,7 @@ class RateLimiter
 
 // استفاده
 $limiter = new RateLimiter($cache, 100, 1);
-$key = 'api:' . $request->ip();
+$key = 'ratelimit.' . sha1($request->ip()) // IPv6 شامل : است;
 
 if ($limiter->tooManyAttempts($key)) {
     die('Too many requests. Please try again later.');
@@ -557,6 +557,8 @@ if ($limiter->tooManyAttempts($key)) {
 $limiter->hit($key);
 // ادامه درخواست...
 ```
+
+> ⚠️ این مثال اتمیک نیست (get و set جدا هستند) و برای محدودیت تقریبی مناسب است. برای محدودیت دقیق از `INCR` در Redis استفاده کنید.
 
 ### Session Management
 
@@ -574,13 +576,13 @@ class CacheSessionHandler implements SessionHandlerInterface
 
     public function read($id): string
     {
-        return $this->cache->get("session:{$id}", '');
+        return $this->cache->get("session.{$id}", '');
     }
 
     public function write($id, $data): bool
     {
         return $this->cache->set(
-            "session:{$id}",
+            "session.{$id}",
             $data,
             $this->minutes * 60
         );
@@ -588,7 +590,7 @@ class CacheSessionHandler implements SessionHandlerInterface
 
     public function destroy($id): bool
     {
-        return $this->cache->delete("session:{$id}");
+        return $this->cache->delete("session.{$id}");
     }
 
     public function gc($max_lifetime): int|false
@@ -650,74 +652,23 @@ echo $fragment->remember('sidebar_menu', 3600, function() {
 
 ### Cache Tags (Grouped Cache)
 
+از نسخهٔ 3.1 tagها در خود کتابخانه پیاده‌سازی شده‌اند:
+
 ```php
-class TaggedCache
-{
-    private $cache;
-
-    public function __construct(MultiTierCache $cache)
-    {
-        $this->cache = $cache;
-    }
-
-    public function tags(array $tags): self
-    {
-        $this->currentTags = $tags;
-        return $this;
-    }
-
-    public function put(string $key, $value, int $ttl): bool
-    {
-        $taggedKey = $this->taggedKey($key);
-        
-        // ذخیره کلید در لیست هر تگ
-        foreach ($this->currentTags as $tag) {
-            $tagKeys = $this->cache->get("tag:{$tag}", []);
-            $tagKeys[] = $key;
-            $this->cache->set("tag:{$tag}", array_unique($tagKeys), 0);
-        }
-
-        return $this->cache->set($taggedKey, $value, $ttl);
-    }
-
-    public function get(string $key)
-    {
-        return $this->cache->get($this->taggedKey($key));
-    }
-
-    public function flush(): void
-    {
-        foreach ($this->currentTags as $tag) {
-            $keys = $this->cache->get("tag:{$tag}", []);
-            foreach ($keys as $key) {
-                $this->cache->delete($this->taggedKey($key));
-            }
-            $this->cache->delete("tag:{$tag}");
-        }
-    }
-
-    private function taggedKey(string $key): string
-    {
-        $tagString = implode('|', $this->currentTags);
-        return "tagged:{$tagString}:{$key}";
-    }
-
-    private $currentTags = [];
-}
-
-// استفاده
-$taggedCache = new TaggedCache($cache);
-
 // ذخیره با تگ
-$taggedCache->tags(['users', 'profiles'])->put('user_1', $userData, 3600);
-$taggedCache->tags(['users', 'profiles'])->put('user_2', $userData2, 3600);
+$cache->tags(['users', 'profiles'])->set('user_1', $userData, 3600);
+$cache->tags(['users', 'profiles'])->set('user_2', $userData2, 3600);
 
-// بازیابی
-$user = $taggedCache->tags(['users', 'profiles'])->get('user_1');
+// بازیابی (با همان مجموعه تگ؛ ترتیب مهم نیست)
+$user = $cache->tags(['profiles', 'users'])->get('user_1');
 
-// پاک کردن همه آیتم‌های یک تگ
-$taggedCache->tags(['users'])->flush();
+// باطل کردن همهٔ آیتم‌های یک تگ
+$cache->invalidateTags('users');
+// یا
+$cache->tags(['users'])->clear();
 ```
+
+آیتم‌های باطل‌شده حذف نمی‌شوند، فقط دیگر قابل دسترسی نیستند و با TTL خودشان یا `prune()` از بین می‌روند.
 
 ---
 
@@ -875,9 +826,9 @@ $cache->set('user', $data);
 $cache->set('product', $data);
 
 // خوب
-$cache->set('user:profile:123', $data);
-$cache->set('product:details:456', $data);
-$cache->set('api:weather:tehran', $data);
+$cache->set('user.profile.123', $data);
+$cache->set('product.details.456', $data);
+$cache->set('api.weather.tehran', $data);
 ```
 
 ### 3. استفاده از SWR برای عملیات گران

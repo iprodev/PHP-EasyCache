@@ -5,39 +5,89 @@ declare(strict_types=1);
 namespace Iprodev\EasyCache\Cache;
 
 use DateInterval;
+use InvalidArgumentException;
+use Iprodev\EasyCache\Clock\SystemClock;
+use Iprodev\EasyCache\Compression\CompressorInterface;
+use Iprodev\EasyCache\Compression\GzipCompressor;
+use Iprodev\EasyCache\Compression\NullCompressor;
+use Iprodev\EasyCache\Compression\ZstdCompressor;
+use Iprodev\EasyCache\Exceptions\InvalidArgument;
+use Iprodev\EasyCache\Lock\FileLockProvider;
+use Iprodev\EasyCache\Lock\LockProviderInterface;
+use Iprodev\EasyCache\Serialization\NativeSerializer;
+use Iprodev\EasyCache\Serialization\SerializerInterface;
+use Iprodev\EasyCache\Storage\BatchStorageInterface;
+use Iprodev\EasyCache\Storage\StorageInterface;
+use Iprodev\EasyCache\Util\KeyValidator;
+use Psr\Clock\ClockInterface;
+use Psr\Log\LoggerAwareInterface;
 use Psr\Log\LoggerInterface;
 use Psr\SimpleCache\CacheInterface;
-use Iprodev\EasyCache\Storage\StorageInterface;
-use Iprodev\EasyCache\Serialization\SerializerInterface;
-use Iprodev\EasyCache\Compression\CompressorInterface;
-use Iprodev\EasyCache\Compression\NullCompressor;
-use Iprodev\EasyCache\Serialization\NativeSerializer;
-use Iprodev\EasyCache\Exceptions\InvalidArgument;
-use Iprodev\EasyCache\Util\KeyValidator;
-use Iprodev\EasyCache\Util\Lock;
+use Throwable;
 
+/**
+ * PSR-16 cache over one or more storage tiers (fastest first), with
+ * stale-while-revalidate, stale-if-error, stampede protection, optional
+ * compression and optional HMAC signing of entries.
+ *
+ * Entry format (binary, version "EC03"):
+ *
+ *   "EC03" | flags (1) | expires (uint64 BE) | swr (uint32 BE) | sei (uint32 BE)
+ *   | serializer name length (1) + name | compressor name length (1) + name
+ *   | [HMAC-SHA256 (32) when flags & 1] | body
+ *
+ * The header is parsed with unpack(), never with unserialize(), so reading an
+ * entry cannot instantiate objects unless the configured serializer does so.
+ */
 class MultiTierCache implements CacheInterface
 {
-    /** @var StorageInterface[] */
+    private const MAGIC = 'EC03';
+    private const FLAG_SIGNED = 1;
+    private const FIXED_HEADER_LENGTH = 21; // magic(4) + flags(1) + expires(8) + swr(4) + sei(4)
+    private const MAC_LENGTH = 32;
+    private const MAX_WINDOW = 4294967295;
+    private const TAG_VERSION_PREFIX = '__ec_tag.';
+
+    /** @var list<StorageInterface> */
     private array $tiers;
     private SerializerInterface $serializer;
     private CompressorInterface $compressor;
+    /** @var array<string, CompressorInterface|null> */
+    private array $compressors = [];
     private int $defaultTtl;
     private ?LoggerInterface $logger;
-    private string $lockPath;
+    private ClockInterface $clock;
+    private LockProviderInterface $locks;
+    private ?string $signingKey;
+    private float $lockTimeout;
 
-    private const MAGIC = "EC02";
-    private const FLAG_NONE = 0;
-    private const FLAG_GZIP = 1;
-    private const FLAG_ZSTD = 2;
+    /** @var array<string, callable(): void> */
+    private array $deferred = [];
+    private bool $shutdownRegistered = false;
+
+    /** @var array{hits: int, misses: int, stale_hits: int, stale_if_error: int, writes: int, deletes: int, errors: int} */
+    private array $stats = [
+        'hits' => 0,
+        'misses' => 0,
+        'stale_hits' => 0,
+        'stale_if_error' => 0,
+        'writes' => 0,
+        'deletes' => 0,
+        'errors' => 0,
+    ];
 
     /**
-     * @param StorageInterface[] $tiers read/write order; tier[0] is primary
-     * @param SerializerInterface|null $serializer
-     * @param CompressorInterface|null $compressor
-     * @param int $defaultTtl default TTL in seconds
-     * @param LoggerInterface|null $logger
-     * @param string|null $lockPath
+     * @param StorageInterface[]         $tiers        Read/write order; tier[0] is the fastest
+     * @param SerializerInterface|null   $serializer   Defaults to NativeSerializer
+     * @param CompressorInterface|null   $compressor   Defaults to NullCompressor
+     * @param int                        $defaultTtl   TTL in seconds when none is given (0 = never expire)
+     * @param LoggerInterface|null       $logger       PSR-3 logger, also handed to tiers without one
+     * @param string|null                $lockPath     Directory for file locks (ignored with $lockProvider)
+     * @param ClockInterface|null        $clock        PSR-20 clock (defaults to the system clock)
+     * @param string|null                $signingKey   Secret (>= 16 bytes) used to sign entries with HMAC-SHA256;
+     *                                                 unsigned or tampered entries are then rejected
+     * @param LockProviderInterface|null $lockProvider Lock implementation (defaults to file locks)
+     * @param float                      $lockTimeout  Seconds to wait for a lock before computing without it
      */
     public function __construct(
         array $tiers,
@@ -45,38 +95,71 @@ class MultiTierCache implements CacheInterface
         ?CompressorInterface $compressor = null,
         int $defaultTtl = 3600,
         ?LoggerInterface $logger = null,
-        ?string $lockPath = null
+        ?string $lockPath = null,
+        ?ClockInterface $clock = null,
+        ?string $signingKey = null,
+        ?LockProviderInterface $lockProvider = null,
+        float $lockTimeout = 30.0
     ) {
-        if (empty($tiers)) {
-            throw new \InvalidArgumentException('At least one storage tier is required.');
+        if ($tiers === []) {
+            throw new InvalidArgumentException('At least one storage tier is required.');
+        }
+        foreach ($tiers as $tier) {
+            if (!$tier instanceof StorageInterface) {
+                throw new InvalidArgumentException('Every tier must implement ' . StorageInterface::class);
+            }
+        }
+        if ($signingKey !== null && strlen($signingKey) < 16) {
+            throw new InvalidArgumentException('The signing key must be at least 16 bytes long.');
         }
 
-        $this->tiers = $tiers;
+        $this->tiers = array_values($tiers);
         $this->serializer = $serializer ?? new NativeSerializer();
         $this->compressor = $compressor ?? new NullCompressor();
         $this->defaultTtl = max(0, $defaultTtl);
         $this->logger = $logger;
-        $this->lockPath = $lockPath ?? sys_get_temp_dir() . '/ec-locks';
+        $this->clock = $clock ?? new SystemClock();
+        $this->signingKey = $signingKey;
+        $this->locks = $lockProvider ?? new FileLockProvider($lockPath);
+        $this->lockTimeout = max(0.0, $lockTimeout);
 
-        if (!is_dir($this->lockPath)) {
-            if (!mkdir($this->lockPath, 0770, true) && !is_dir($this->lockPath)) {
-                throw new \RuntimeException("Failed to create lock directory: {$this->lockPath}");
+        self::assertName($this->serializer->name(), 'Serializer');
+        self::assertName($this->compressor->name(), 'Compressor');
+
+        if ($logger !== null) {
+            foreach ($this->tiers as $tier) {
+                if (
+                    $tier instanceof LoggerAwareInterface
+                    && !(method_exists($tier, 'hasLogger') && $tier->hasLogger())
+                ) {
+                    $tier->setLogger($logger);
+                }
             }
         }
     }
+
+    // ---------------------------------------------------------------------
+    // PSR-16
+    // ---------------------------------------------------------------------
 
     public function get(string $key, mixed $default = null): mixed
     {
         KeyValidator::assert($key);
 
         try {
-            $now = time();
-            $hit = $this->readThrough($key, $now, false);
-            return $hit['value'] ?? $default;
-        } catch (\Throwable $e) {
-            $this->log('warning', "Cache get failed for key '{$key}': " . $e->getMessage());
+            $hit = $this->lookup([$key], false)[$key] ?? null;
+        } catch (Throwable $e) {
+            $this->failure('warning', 'Cache get failed for key {key}', $key, $e);
             return $default;
         }
+
+        if ($hit === null) {
+            $this->stats['misses']++;
+            return $default;
+        }
+
+        $this->stats['hits']++;
+        return $hit['value'];
     }
 
     public function set(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
@@ -84,18 +167,14 @@ class MultiTierCache implements CacheInterface
         KeyValidator::assert($key);
 
         try {
-            $seconds = $this->normalizeTtl($ttl);
-
-            if ($seconds <= 0 && $ttl !== null) {
+            $seconds = $this->resolveTtl($ttl);
+            if ($ttl !== null && $seconds <= 0) {
                 return $this->delete($key);
             }
 
-            $expires = $seconds === 0 ? 0 : (time() + ($seconds > 0 ? $seconds : $this->defaultTtl));
-            $payload = $this->encodeRecord($value, $expires, 0, 0);
-
-            return $this->writeAllTiers($key, $payload, $this->visibleTtl($expires, 0, 0));
-        } catch (\Throwable $e) {
-            $this->log('error', "Cache set failed for key '{$key}': " . $e->getMessage());
+            return $this->store($key, $value, $this->expiresAt($seconds), 0, 0);
+        } catch (Throwable $e) {
+            $this->failure('error', 'Cache set failed for key {key}', $key, $e);
             return false;
         }
     }
@@ -105,68 +184,145 @@ class MultiTierCache implements CacheInterface
         KeyValidator::assert($key);
 
         $ok = true;
-        foreach ($this->tiers as $t) {
+        foreach ($this->tiers as $i => $tier) {
             try {
-                $ok = $t->delete($key) && $ok;
-            } catch (\Throwable $e) {
-                $this->log('warning', "Delete failed on tier for key '{$key}': " . $e->getMessage());
+                $ok = $tier->delete($key) && $ok;
+            } catch (Throwable $e) {
+                $this->failure('warning', "Delete failed on tier {$i} for key {key}", $key, $e);
                 $ok = false;
             }
         }
+        $this->stats['deletes']++;
+
         return $ok;
     }
 
     public function clear(): bool
     {
         $ok = true;
-        foreach ($this->tiers as $t) {
+        foreach ($this->tiers as $i => $tier) {
             try {
-                $ok = $t->clear() && $ok;
-            } catch (\Throwable $e) {
-                $this->log('warning', "Clear failed on tier: " . $e->getMessage());
+                $ok = $tier->clear() && $ok;
+            } catch (Throwable $e) {
+                $this->failure('warning', "Clear failed on tier {$i}", null, $e);
                 $ok = false;
             }
         }
         return $ok;
     }
 
-    public function getMultiple(iterable $keys, mixed $default = null): iterable
+    /**
+     * @param iterable<mixed> $keys
+     * @return array<string, mixed>
+     */
+    public function getMultiple(iterable $keys, mixed $default = null): array
     {
-        if (!is_iterable($keys)) {
-            throw new InvalidArgument('Keys must be iterable');
+        $list = $this->normalizeKeys($keys);
+
+        try {
+            $hits = $this->lookup(array_values(array_unique($list)), false);
+        } catch (Throwable $e) {
+            $this->failure('warning', 'Cache getMultiple failed', null, $e);
+            $hits = [];
         }
 
         $result = [];
-        foreach ($keys as $k) {
-            $result[$k] = $this->get((string)$k, $default);
+        foreach ($list as $key) {
+            if (array_key_exists($key, $hits)) {
+                $result[$key] = $hits[$key]['value'];
+                $this->stats['hits']++;
+            } else {
+                $result[$key] = $default;
+                $this->stats['misses']++;
+            }
         }
+
         return $result;
     }
 
+    /**
+     * @param iterable<mixed, mixed> $values
+     */
     public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
     {
-        if (!is_iterable($values)) {
-            throw new InvalidArgument('Values must be iterable');
+        $items = [];
+        foreach ($values as $key => $value) {
+            $items[KeyValidator::normalize($key)] = $value;
+        }
+        if ($items === []) {
+            return true;
         }
 
-        $all = true;
-        foreach ($values as $k => $v) {
-            $all = $this->set((string)$k, $v, $ttl) && $all;
+        try {
+            $seconds = $this->resolveTtl($ttl);
+            if ($ttl !== null && $seconds <= 0) {
+                return $this->deleteMultiple(array_map('strval', array_keys($items)));
+            }
+            $expires = $this->expiresAt($seconds);
+        } catch (Throwable $e) {
+            $this->failure('error', 'Cache setMultiple failed', null, $e);
+            return false;
         }
-        return $all;
+
+        $ok = true;
+        $payloads = [];
+        foreach ($items as $key => $value) {
+            try {
+                $payloads[(string) $key] = $this->encodeRecord($value, $expires, 0, 0);
+            } catch (Throwable $e) {
+                $this->failure('error', 'Cache set failed for key {key}', (string) $key, $e);
+                $ok = false;
+            }
+        }
+
+        $ttlSeconds = $this->physicalTtl($expires, 0, 0);
+        foreach ($this->tiers as $i => $tier) {
+            try {
+                if ($tier instanceof BatchStorageInterface) {
+                    $ok = $tier->setMany($payloads, $ttlSeconds) && $ok;
+                } else {
+                    foreach ($payloads as $key => $payload) {
+                        $ok = $tier->set((string) $key, $payload, $ttlSeconds) && $ok;
+                    }
+                }
+            } catch (Throwable $e) {
+                $this->failure('warning', "setMultiple failed on tier {$i}", null, $e);
+                $ok = false;
+            }
+        }
+        $this->stats['writes'] += count($payloads);
+
+        return $ok;
     }
 
+    /**
+     * @param iterable<mixed> $keys
+     */
     public function deleteMultiple(iterable $keys): bool
     {
-        if (!is_iterable($keys)) {
-            throw new InvalidArgument('Keys must be iterable');
+        $list = array_values(array_unique($this->normalizeKeys($keys)));
+        if ($list === []) {
+            return true;
         }
 
-        $all = true;
-        foreach ($keys as $k) {
-            $all = $this->delete((string)$k) && $all;
+        $ok = true;
+        foreach ($this->tiers as $i => $tier) {
+            try {
+                if ($tier instanceof BatchStorageInterface) {
+                    $ok = $tier->deleteMany($list) && $ok;
+                } else {
+                    foreach ($list as $key) {
+                        $ok = $tier->delete($key) && $ok;
+                    }
+                }
+            } catch (Throwable $e) {
+                $this->failure('warning', "deleteMultiple failed on tier {$i}", null, $e);
+                $ok = false;
+            }
         }
-        return $all;
+        $this->stats['deletes'] += count($list);
+
+        return $ok;
     }
 
     public function has(string $key): bool
@@ -174,25 +330,35 @@ class MultiTierCache implements CacheInterface
         KeyValidator::assert($key);
 
         try {
-            $now = time();
-            $hit = $this->readThrough($key, $now, false, false);
-            return $hit['value'] !== null;
-        } catch (\Throwable $e) {
-            $this->log('warning', "Cache has check failed for key '{$key}': " . $e->getMessage());
+            return isset($this->lookup([$key], false, false, false)[$key]);
+        } catch (Throwable $e) {
+            $this->failure('warning', 'Cache has failed for key {key}', $key, $e);
             return false;
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Extensions
+    // ---------------------------------------------------------------------
+
     /**
-     * Get or set with Stale-While-Revalidate support.
+     * Get a value or compute it, with stale-while-revalidate and stale-if-error.
      *
-     * @param string $key Cache key
-     * @param callable $producer Function to produce fresh value: function(): mixed
-     * @param null|int|DateInterval $ttl Fresh data TTL
-     * @param int $swrSeconds Stale-while-revalidate window in seconds
-     * @param int $staleIfErrorSeconds Stale-if-error window in seconds
-     * @param array{mode?: string} $options Options: 'mode' => 'sync'|'defer'
-     * @return mixed
+     * - Fresh entry: returned as is.
+     * - Expired but within $swrSeconds: the stale value is served while the
+     *   entry is refreshed. In "sync" mode the process that wins the lock
+     *   refreshes right away and returns the new value (others get the stale
+     *   value without waiting); in "defer" mode the refresh runs after the
+     *   response has been sent (PHP-FPM/LiteSpeed; elsewhere falls back to sync).
+     * - Expired but within $staleIfErrorSeconds: recomputed; if the producer
+     *   throws, the stale value is returned instead of the exception.
+     * - Missing: computed under a per-key lock so concurrent requests do not
+     *   all run the producer (cache stampede protection).
+     *
+     * A null TTL uses the default TTL; a TTL <= 0 computes the value without caching it.
+     *
+     * @param callable(): mixed  $producer
+     * @param array{mode?: string} $options 'mode' => 'sync'|'defer'
      */
     public function getOrSetSWR(
         string $key,
@@ -204,52 +370,142 @@ class MultiTierCache implements CacheInterface
     ): mixed {
         KeyValidator::assert($key);
 
-        $now = time();
-        $seconds = $this->normalizeTtl($ttl);
-        $freshTtl = $seconds > 0 ? $seconds : $this->defaultTtl;
-
-        try {
-            $hit = $this->readThrough($key, $now, true);
-
-            if ($hit['value'] !== null) {
-                // Trigger background revalidation if in SWR window
-                if ($hit['expired'] && $hit['within_swr']) {
-                    $this->maybeRevalidate($key, $producer, $freshTtl, $swrSeconds, $staleIfErrorSeconds, $options);
-                }
-                return $hit['value'];
-            }
-        } catch (\Throwable $e) {
-            $this->log('warning', "SWR cache read failed for key '{$key}': " . $e->getMessage());
+        $mode = $options['mode'] ?? 'sync';
+        if ($mode !== 'sync' && $mode !== 'defer') {
+            throw new InvalidArgument("Invalid SWR mode '{$mode}', expected 'sync' or 'defer'");
         }
 
-        // Cache miss: compute under per-key lock
-        $lock = $this->lockFor($key);
-        if (!$lock->acquire(true)) {
-            $this->log('warning', "Failed to acquire lock for key '{$key}', computing without lock");
+        $seconds = $this->resolveTtl($ttl);
+        if ($ttl !== null && $seconds <= 0) {
             return $producer();
         }
 
+        $swr = min(self::MAX_WINDOW, max(0, $swrSeconds));
+        $sei = min(self::MAX_WINDOW, max(0, $staleIfErrorSeconds));
+
+        $hit = null;
         try {
-            // Double-check after acquiring lock
-            $hit2 = $this->readThrough($key, time(), true);
-            if ($hit2['value'] !== null) {
-                return $hit2['value'];
+            $hit = $this->lookup([$key], true)[$key] ?? null;
+        } catch (Throwable $e) {
+            $this->failure('warning', 'SWR cache read failed for key {key}', $key, $e);
+        }
+
+        if ($hit !== null && !$hit['stale']) {
+            $this->stats['hits']++;
+            return $hit['value'];
+        }
+
+        if ($hit !== null && $hit['within_swr']) {
+            $this->stats['stale_hits']++;
+
+            if ($mode === 'defer' && self::canDefer()) {
+                $this->defer($key, function () use ($key, $producer, $seconds, $swr, $sei): void {
+                    $this->revalidate($key, $producer, $seconds, $swr, $sei);
+                });
+                return $hit['value'];
             }
 
-            // Compute fresh value
-            try {
-                $val = $producer();
-                $expires = time() + $freshTtl;
-                $payload = $this->encodeRecord($val, $expires, $swrSeconds, $staleIfErrorSeconds);
-                $this->writeAllTiers($key, $payload, $this->visibleTtl($expires, $swrSeconds, $staleIfErrorSeconds));
-                return $val;
-            } catch (\Throwable $e) {
-                $this->log('error', "Producer failed for key '{$key}': " . $e->getMessage());
-                throw $e;
-            }
-        } finally {
-            $lock->release();
+            $fresh = $this->revalidate($key, $producer, $seconds, $swr, $sei);
+            return $fresh['ok'] ? $fresh['value'] : $hit['value'];
         }
+
+        if ($hit === null) {
+            $this->stats['misses']++;
+        }
+
+        // Missing, or stale and only usable as a fallback if the producer fails.
+        return $this->computeWithLock($key, $producer, $seconds, $swr, $sei, $hit);
+    }
+
+    /**
+     * Get a value or compute and cache it (no stale serving).
+     *
+     * @param callable(): mixed $producer
+     */
+    public function remember(string $key, null|int|DateInterval $ttl, callable $producer): mixed
+    {
+        return $this->getOrSetSWR($key, $producer, $ttl);
+    }
+
+    /**
+     * Store a value without expiry.
+     */
+    public function forever(string $key, mixed $value): bool
+    {
+        KeyValidator::assert($key);
+
+        try {
+            return $this->store($key, $value, 0, 0, 0);
+        } catch (Throwable $e) {
+            $this->failure('error', 'Cache set failed for key {key}', $key, $e);
+            return false;
+        }
+    }
+
+    /**
+     * A view of the cache whose entries are invalidated together with the
+     * given tags (see invalidateTags()). Entries must be read with the same
+     * set of tags they were written with.
+     *
+     * @param string|list<string> $tags
+     */
+    public function tags(string|array $tags): TaggedCache
+    {
+        return new TaggedCache($this, $this->normalizeTags($tags));
+    }
+
+    /**
+     * Invalidate every entry written with any of the given tags.
+     *
+     * Invalidated entries are not deleted, they just become unreachable and
+     * expire through their TTL (or prune()).
+     *
+     * @param string|list<string> $tags
+     */
+    public function invalidateTags(string|array $tags): bool
+    {
+        $ok = true;
+        foreach ($this->normalizeTags($tags) as $tag) {
+            $ok = $this->forever(self::TAG_VERSION_PREFIX . $tag, bin2hex(random_bytes(8))) && $ok;
+        }
+        return $ok;
+    }
+
+    /**
+     * Build the internal key for an entry under a set of tags.
+     *
+     * @internal Used by TaggedCache.
+     * @param list<string> $tags
+     */
+    public function taggedKey(array $tags, string $key): string
+    {
+        KeyValidator::assert($key);
+
+        $versionKeys = [];
+        foreach ($tags as $tag) {
+            $versionKeys[$tag] = self::TAG_VERSION_PREFIX . $tag;
+        }
+
+        $current = $this->getMultiple(array_values($versionKeys));
+        $parts = [];
+        foreach ($versionKeys as $tag => $versionKey) {
+            $version = $current[$versionKey] ?? null;
+            if (!is_string($version)) {
+                $version = bin2hex(random_bytes(8));
+                $this->forever($versionKey, $version);
+            }
+            $parts[] = $tag . '=' . $version;
+        }
+
+        $taggedKey = 'tag.' . hash('xxh128', implode('|', $parts)) . '.' . $key;
+        if (strlen($taggedKey) > KeyValidator::MAX_LENGTH) {
+            throw new InvalidArgument(sprintf(
+                'Cache key is too long to be used with tags (max %d bytes)',
+                KeyValidator::MAX_LENGTH - 38
+            ));
+        }
+
+        return $taggedKey;
     }
 
     /**
@@ -260,295 +516,591 @@ class MultiTierCache implements CacheInterface
     public function prune(): int
     {
         $sum = 0;
-        foreach ($this->tiers as $t) {
-            if (method_exists($t, 'prune')) {
-                try {
-                    $count = (int)$t->prune();
-                    $sum += $count;
-                } catch (\Throwable $e) {
-                    $this->log('warning', "Prune failed on tier: " . $e->getMessage());
-                }
+        foreach ($this->tiers as $i => $tier) {
+            try {
+                $sum += $tier->prune();
+            } catch (Throwable $e) {
+                $this->failure('warning', "Prune failed on tier {$i}", null, $e);
             }
         }
         return $sum;
     }
 
-    private function maybeRevalidate(
+    /**
+     * Counters collected by this instance since creation (or resetStats()).
+     *
+     * @return array{
+     *   hits: int, misses: int, stale_hits: int, stale_if_error: int,
+     *   writes: int, deletes: int, errors: int, hit_ratio: float
+     * }
+     */
+    public function getStats(): array
+    {
+        $lookups = $this->stats['hits'] + $this->stats['misses'] + $this->stats['stale_hits'];
+        $served = $this->stats['hits'] + $this->stats['stale_hits'];
+
+        return $this->stats + ['hit_ratio' => $lookups > 0 ? round($served / $lookups, 4) : 0.0];
+    }
+
+    public function resetStats(): void
+    {
+        foreach ($this->stats as $name => $value) {
+            $this->stats[$name] = 0;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // SWR internals
+    // ---------------------------------------------------------------------
+
+    /**
+     * Refresh an entry if no other process is doing so already.
+     *
+     * @param callable(): mixed $producer
+     * @return array{ok: bool, value: mixed}
+     */
+    private function revalidate(string $key, callable $producer, int $seconds, int $swr, int $sei): array
+    {
+        $lock = $this->locks->create($key);
+
+        try {
+            if (!$lock->acquire(false)) {
+                return ['ok' => false, 'value' => null];
+            }
+        } catch (Throwable $e) {
+            $this->failure('warning', 'Failed to acquire lock for key {key}', $key, $e);
+            return ['ok' => false, 'value' => null];
+        }
+
+        try {
+            // Another process may have refreshed the entry meanwhile.
+            $current = $this->lookup([$key], false)[$key] ?? null;
+            if ($current !== null) {
+                return ['ok' => true, 'value' => $current['value']];
+            }
+
+            $value = $producer();
+            $this->storeComputed($key, $value, $seconds, $swr, $sei);
+
+            return ['ok' => true, 'value' => $value];
+        } catch (Throwable $e) {
+            $this->failure('warning', 'SWR refresh failed for key {key}', $key, $e);
+            return ['ok' => false, 'value' => null];
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * @param callable(): mixed $producer
+     * @param array{value: mixed, stale: bool, within_swr: bool, within_sei: bool}|null $stale
+     */
+    private function computeWithLock(
         string $key,
         callable $producer,
-        int $freshTtl,
-        int $swrSeconds,
-        int $staleIfErrorSeconds,
-        array $options
-    ): void {
-        $mode = $options['mode'] ?? 'sync';
+        int $seconds,
+        int $swr,
+        int $sei,
+        ?array $stale
+    ): mixed {
+        $lock = $this->locks->create($key);
+        $locked = false;
 
-        $revalidate = function () use ($key, $producer, $freshTtl, $swrSeconds, $staleIfErrorSeconds): void {
-            $lock = $this->lockFor($key);
+        try {
+            $locked = $lock->acquire(true, $this->lockTimeout);
+        } catch (Throwable $e) {
+            $this->failure('warning', 'Failed to acquire lock for key {key}', $key, $e);
+        }
 
-            // Non-blocking lock: if another process is already revalidating, skip
-            if (!$lock->acquire(false)) {
-                return;
+        if (!$locked) {
+            $this->log('warning', 'Could not acquire lock for key {key}, computing without it', ['key' => $key]);
+        }
+
+        try {
+            if ($locked) {
+                // Double-check: another process may have computed it while we waited.
+                try {
+                    $current = $this->lookup([$key], false)[$key] ?? null;
+                } catch (Throwable $e) {
+                    $current = null;
+                }
+                if ($current !== null) {
+                    return $current['value'];
+                }
             }
 
             try {
-                $val = $producer();
-                $expires = time() + $freshTtl;
-                $payload = $this->encodeRecord($val, $expires, $swrSeconds, $staleIfErrorSeconds);
-                $this->writeAllTiers($key, $payload, $this->visibleTtl($expires, $swrSeconds, $staleIfErrorSeconds));
-            } catch (\Throwable $e) {
-                $this->log('warning', "SWR refresh failed for key '{$key}': " . $e->getMessage());
-            } finally {
+                $value = $producer();
+            } catch (Throwable $e) {
+                if ($stale !== null && $stale['within_sei']) {
+                    $this->stats['stale_if_error']++;
+                    $this->failure('warning', 'Producer failed for key {key}, serving stale value', $key, $e);
+                    return $stale['value'];
+                }
+                $this->failure('error', 'Producer failed for key {key}', $key, $e);
+                throw $e;
+            }
+
+            $this->storeComputed($key, $value, $seconds, $swr, $sei);
+
+            return $value;
+        } finally {
+            if ($locked) {
                 $lock->release();
             }
-        };
-
-        // Defer mode: run after response is sent
-        if ($mode === 'defer' && function_exists('fastcgi_finish_request')) {
-            register_shutdown_function(function () use ($revalidate) {
-                try {
-                    if (function_exists('fastcgi_finish_request')) {
-                        @fastcgi_finish_request();
-                    }
-                } catch (\Throwable $e) {
-                    // Ignore fastcgi_finish_request errors
-                }
-                $revalidate();
-            });
-        } else {
-            // Sync mode: run immediately
-            $revalidate();
         }
     }
 
-    private function readThrough(string $key, int $now, bool $allowStale, bool $backfill = true): array
+    private function storeComputed(string $key, mixed $value, int $seconds, int $swr, int $sei): void
     {
-        $record = null;
-        $tierIndex = -1;
+        try {
+            $this->store($key, $value, $this->expiresAt($seconds), $swr, $sei);
+        } catch (Throwable $e) {
+            $this->failure('error', 'Failed to store computed value for key {key}', $key, $e);
+        }
+    }
 
-        // Read from tiers in order
+    private static function canDefer(): bool
+    {
+        return function_exists('fastcgi_finish_request') || function_exists('litespeed_finish_request');
+    }
+
+    /**
+     * @param callable(): void $job
+     */
+    private function defer(string $key, callable $job): void
+    {
+        if (isset($this->deferred[$key])) {
+            return;
+        }
+        $this->deferred[$key] = $job;
+
+        if (!$this->shutdownRegistered) {
+            $this->shutdownRegistered = true;
+            register_shutdown_function(function (): void {
+                $this->runDeferred();
+            });
+        }
+    }
+
+    private function runDeferred(): void
+    {
+        if ($this->deferred === []) {
+            return;
+        }
+
+        try {
+            if (function_exists('fastcgi_finish_request')) {
+                @fastcgi_finish_request();
+            } elseif (function_exists('litespeed_finish_request')) {
+                @litespeed_finish_request();
+            }
+        } catch (Throwable) {
+            // Ignore: the jobs still run, only the response is not flushed early.
+        }
+
+        $jobs = $this->deferred;
+        $this->deferred = [];
+        foreach ($jobs as $job) {
+            try {
+                $job();
+            } catch (Throwable $e) {
+                $this->failure('warning', 'Deferred revalidation failed', null, $e);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Tier access
+    // ---------------------------------------------------------------------
+
+    /**
+     * Look up keys across tiers.
+     *
+     * A tier's entry is used when it is fresh. Expired entries do not stop the
+     * search: lower tiers may hold a fresher copy (written by another server).
+     * With $allowStale, the first expired-but-still-usable entry is returned
+     * when no tier has a fresh one. Entries found in lower tiers are copied
+     * to the tiers above them.
+     *
+     * @param list<string> $keys
+     * @return array<string, array{value: mixed, stale: bool, within_swr: bool, within_sei: bool}>
+     */
+    private function lookup(array $keys, bool $allowStale, bool $withValue = true, bool $backfill = true): array
+    {
+        $now = $this->now();
+        $pending = [];
+        foreach ($keys as $key) {
+            $pending[$key] = true;
+        }
+
+        /** @var array<string, array{record: array{e: int, swr: int, sei: int, v: mixed}, raw: string, tier: int, stale: bool}> $found */
+        $found = [];
+
+        foreach ($this->tiers as $index => $tier) {
+            if ($pending === []) {
+                break;
+            }
+
+            $wanted = array_map('strval', array_keys($pending));
+            try {
+                $raws = $this->fetch($tier, $wanted);
+            } catch (Throwable $e) {
+                $this->failure('warning', "Read failed on tier {$index}", null, $e);
+                continue;
+            }
+
+            foreach ($wanted as $key) {
+                $raw = $raws[$key] ?? null;
+                if (!is_string($raw)) {
+                    continue;
+                }
+
+                try {
+                    $record = $this->decodeRecord($raw, $withValue);
+                } catch (Throwable $e) {
+                    $this->failure('warning', "Failed to decode entry for key {key} on tier {$index}", $key, $e);
+                    $record = null;
+                }
+                if ($record === null) {
+                    continue;
+                }
+
+                $state = $this->classify($record, $now);
+                if ($state === 'fresh') {
+                    $found[$key] = ['record' => $record, 'raw' => $raw, 'tier' => $index, 'stale' => false];
+                    unset($pending[$key]);
+                } elseif ($state === 'stale' && $allowStale && !isset($found[$key])) {
+                    // Keep looking in lower tiers for a fresh copy.
+                    $found[$key] = ['record' => $record, 'raw' => $raw, 'tier' => $index, 'stale' => true];
+                }
+            }
+        }
+
+        $result = [];
+        foreach ($found as $key => $entry) {
+            $record = $entry['record'];
+            $key = (string) $key;
+
+            if ($backfill && $entry['tier'] > 0) {
+                $this->backfill($key, $entry['raw'], $entry['tier'], $record);
+            }
+
+            $expired = $entry['stale'];
+            $result[$key] = [
+                'value' => $record['v'],
+                'stale' => $expired,
+                'within_swr' => $expired && $record['swr'] > 0 && $now < $record['e'] + $record['swr'],
+                'within_sei' => $expired && $record['sei'] > 0 && $now < $record['e'] + $record['sei'],
+            ];
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param array{e: int, swr: int, sei: int, v: mixed} $record
+     */
+    private function backfill(string $key, string $raw, int $foundTier, array $record): void
+    {
+        $ttl = $this->physicalTtl($record['e'], $record['swr'], $record['sei']);
+
+        for ($j = 0; $j < $foundTier; $j++) {
+            try {
+                $this->tiers[$j]->set($key, $raw, $ttl);
+            } catch (Throwable $e) {
+                $this->failure('warning', "Backfill failed on tier {$j} for key {key}", $key, $e);
+            }
+        }
+    }
+
+    /**
+     * @param list<string> $keys
+     * @return array<string, string>
+     */
+    private function fetch(StorageInterface $tier, array $keys): array
+    {
+        if (count($keys) > 1 && $tier instanceof BatchStorageInterface) {
+            return $tier->getMany($keys);
+        }
+
+        $result = [];
+        foreach ($keys as $key) {
+            $raw = $tier->get($key);
+            if ($raw !== null) {
+                $result[$key] = $raw;
+            }
+        }
+        return $result;
+    }
+
+    private function store(string $key, mixed $value, int $expires, int $swr, int $sei): bool
+    {
+        $payload = $this->encodeRecord($value, $expires, $swr, $sei);
+        $ttl = $this->physicalTtl($expires, $swr, $sei);
+
+        $ok = true;
         foreach ($this->tiers as $i => $tier) {
             try {
-                $raw = $tier->get($key);
-                if ($raw === null) {
-                    continue;
-                }
-
-                $rec = $this->decodeRecord($raw);
-                if ($rec === null) {
-                    continue;
-                }
-
-                $record = $rec;
-                $tierIndex = $i;
-                break;
-            } catch (\Throwable $e) {
-                $this->log('warning', "Read failed on tier {$i} for key '{$key}': " . $e->getMessage());
-            }
-        }
-
-        if ($record === null) {
-            return ['value' => null];
-        }
-
-        $expires = (int)$record['e'];
-        $swr = (int)$record['swr'];
-        $sei = (int)$record['sei'];
-
-        $expired = ($expires > 0 && $expires < $now);
-        $within_swr = $expired && ($swr > 0) && ($now < $expires + $swr);
-        $within_sei = $expired && ($sei > 0) && ($now < $expires + $sei);
-
-        // Return null if expired and stale is not allowed
-        if ($expired && !$allowStale) {
-            return ['value' => null];
-        }
-
-        // Return null if expired and outside SWR/SEI windows
-        if ($expired && !$within_swr && !$within_sei) {
-            return ['value' => null];
-        }
-
-        // Backfill to faster tiers
-        if ($backfill && $tierIndex > 0) {
-            $ttl = $this->visibleTtl($expires, $swr, $sei);
-            if ($ttl > 0) {
-                $payload = $this->encodeRecord($record['v'], $expires, $swr, $sei);
-                for ($j = 0; $j < $tierIndex; $j++) {
-                    try {
-                        $this->tiers[$j]->set($key, $payload, $ttl);
-                    } catch (\Throwable $e) {
-                        $this->log('warning', "Backfill failed on tier {$j}: " . $e->getMessage());
-                    }
-                }
-            }
-        }
-
-        return [
-            'value' => $record['v'],
-            'expired' => $expired,
-            'within_swr' => $within_swr,
-            'within_sei' => $within_sei,
-        ];
-    }
-
-    private function writeAllTiers(string $key, string $payload, int $ttl): bool
-    {
-        $ok = true;
-        foreach ($this->tiers as $tier) {
-            try {
                 $ok = $tier->set($key, $payload, $ttl) && $ok;
-            } catch (\Throwable $e) {
-                $this->log('warning', "Write failed on tier for key '{$key}': " . $e->getMessage());
+            } catch (Throwable $e) {
+                $this->failure('warning', "Write failed on tier {$i} for key {key}", $key, $e);
                 $ok = false;
             }
         }
+        $this->stats['writes']++;
+
         return $ok;
     }
 
-    private function visibleTtl(int $expires, int $swr, int $sei): int
+    /**
+     * @param array{e: int, swr: int, sei: int, v: mixed} $record
+     * @return 'fresh'|'stale'|'dead'
+     */
+    private function classify(array $record, int $now): string
     {
-        if ($expires === 0) {
-            return 0;
+        $expires = $record['e'];
+        if ($expires === 0 || $now < $expires) {
+            return 'fresh';
         }
 
-        $maxExtra = max($swr, $sei);
-        $ttlUntil = $expires + $maxExtra - time();
-        return $ttlUntil > 0 ? $ttlUntil : 1;
+        $window = max($record['swr'], $record['sei']);
+
+        return $now < $expires + $window ? 'stale' : 'dead';
     }
 
-    private function encodeRecord(mixed $value, int $expires, int $swrSeconds, int $seiSeconds): string
+    // ---------------------------------------------------------------------
+    // Encoding
+    // ---------------------------------------------------------------------
+
+    private function encodeRecord(mixed $value, int $expires, int $swr, int $sei): string
     {
-        try {
-            $val = $this->serializer->serialize($value);
-            $tuple = serialize([
-                'e' => $expires,
-                'swr' => $swrSeconds,
-                'sei' => $seiSeconds,
-                'v' => $val,
-                'sn' => $this->serializer->name()
-            ]);
+        $body = $this->serializer->serialize($value);
 
-            $flag = chr(self::FLAG_NONE);
-            $data = $tuple;
-            $compName = $this->compressor->name();
-
-            if ($compName === 'gzip') {
-                $flag = chr(self::FLAG_GZIP);
-                $data = $this->compressor->compress($tuple);
-            } elseif ($compName === 'zstd') {
-                $flag = chr(self::FLAG_ZSTD);
-                $data = $this->compressor->compress($tuple);
-            }
-
-            $sn = $this->serializer->name();
-            $snlen = strlen($sn);
-
-            if ($snlen > 255) {
-                throw new \RuntimeException('Serializer name too long (max 255 chars)');
-            }
-
-            return self::MAGIC . $flag . chr($snlen) . $sn . $data;
-        } catch (\Throwable $e) {
-            throw new \RuntimeException("Failed to encode cache record: " . $e->getMessage(), 0, $e);
+        $compressorName = $this->compressor->name();
+        if ($compressorName !== 'none') {
+            $body = $this->compressor->compress($body);
         }
+
+        $serializerName = $this->serializer->name();
+        $flags = $this->signingKey !== null ? self::FLAG_SIGNED : 0;
+
+        $header = self::MAGIC
+            . chr($flags)
+            . pack('JNN', max(0, $expires), $swr, $sei)
+            . chr(strlen($serializerName)) . $serializerName
+            . chr(strlen($compressorName)) . $compressorName;
+
+        if ($this->signingKey !== null) {
+            return $header . hash_hmac('sha256', $header . $body, $this->signingKey, true) . $body;
+        }
+
+        return $header . $body;
     }
 
-    private function decodeRecord(string $raw): ?array
+    /**
+     * @return array{e: int, swr: int, sei: int, v: mixed}|null
+     */
+    private function decodeRecord(string $raw, bool $withValue = true): ?array
     {
-        try {
-            if (strlen($raw) < 6) {
-                return null;
-            }
-
-            $magic = substr($raw, 0, 4);
-            if ($magic !== self::MAGIC) {
-                return null;
-            }
-
-            $flagByte = ord($raw[4]);
-            $snlen = ord($raw[5]);
-            $offset = 6 + $snlen;
-
-            if (strlen($raw) < $offset) {
-                return null;
-            }
-
-            $storedSerializer = substr($raw, 6, $snlen);
-            $payload = substr($raw, $offset);
-
-            // Decompress if needed
-            if ($flagByte === self::FLAG_GZIP || $flagByte === self::FLAG_ZSTD) {
-                try {
-                    $payload = $this->compressor->decompress($payload);
-                } catch (\Throwable $e) {
-                    $this->log('warning', "Decompression failed: " . $e->getMessage());
-                    return null;
-                }
-            }
-
-            // Unserialize metadata
-            $arr = @unserialize($payload, ['allowed_classes' => true]);
-            if (!is_array($arr) || !isset($arr['e'], $arr['v'], $arr['sn'])) {
-                return null;
-            }
-
-            // Deserialize value with appropriate serializer
-            if ($arr['sn'] !== $this->serializer->name()) {
-                $this->log('info', "Serializer mismatch: stored={$arr['sn']}, current={$this->serializer->name()}");
-                // Try to deserialize with current serializer anyway
-            }
-
-            try {
-                $v = $this->serializer->deserialize($arr['v']);
-            } catch (\Throwable $e) {
-                $this->log('warning', "Deserialization failed: " . $e->getMessage());
-                return null;
-            }
-
-            return [
-                'e' => (int)$arr['e'],
-                'swr' => (int)($arr['swr'] ?? 0),
-                'sei' => (int)($arr['sei'] ?? 0),
-                'v' => $v
-            ];
-        } catch (\Throwable $e) {
-            $this->log('warning', "Failed to decode cache record: " . $e->getMessage());
+        $length = strlen($raw);
+        if ($length < self::FIXED_HEADER_LENGTH + 2 || strncmp($raw, self::MAGIC, 4) !== 0) {
             return null;
         }
+
+        $flags = ord($raw[4]);
+        /** @var array{e: int, swr: int, sei: int} $times */
+        $times = unpack('Je/Nswr/Nsei', $raw, 5);
+
+        $pos = self::FIXED_HEADER_LENGTH;
+        $serializerName = self::readName($raw, $pos);
+        $compressorName = $serializerName === null ? null : self::readName($raw, $pos);
+        if ($serializerName === null || $compressorName === null) {
+            return null;
+        }
+        $headerLength = $pos;
+
+        $mac = null;
+        if (($flags & self::FLAG_SIGNED) !== 0) {
+            if ($pos + self::MAC_LENGTH > $length) {
+                return null;
+            }
+            $mac = substr($raw, $pos, self::MAC_LENGTH);
+            $pos += self::MAC_LENGTH;
+        }
+
+        if ($this->signingKey !== null) {
+            if ($mac === null) {
+                $this->log('warning', 'Rejected unsigned cache entry (a signing key is configured)');
+                return null;
+            }
+            $signed = substr($raw, 0, $headerLength) . substr($raw, $pos);
+            $expected = hash_hmac('sha256', $signed, $this->signingKey, true);
+            if (!hash_equals($expected, $mac)) {
+                $this->log('warning', 'Rejected cache entry with an invalid signature');
+                return null;
+            }
+        }
+
+        if ($serializerName !== $this->serializer->name()) {
+            return null;
+        }
+
+        $compressor = null;
+        if ($compressorName !== 'none') {
+            $compressor = $this->compressorFor($compressorName);
+            if ($compressor === null) {
+                return null;
+            }
+        }
+
+        $record = ['e' => $times['e'], 'swr' => $times['swr'], 'sei' => $times['sei'], 'v' => null];
+        if (!$withValue) {
+            return $record;
+        }
+
+        $body = substr($raw, $pos);
+        if ($compressor !== null) {
+            $body = $compressor->decompress($body);
+        }
+        $record['v'] = $this->serializer->deserialize($body);
+
+        return $record;
     }
 
-    private function normalizeTtl(null|int|DateInterval $ttl): int
+    private static function readName(string $raw, int &$pos): ?string
+    {
+        if ($pos >= strlen($raw)) {
+            return null;
+        }
+        $nameLength = ord($raw[$pos]);
+        $pos++;
+        if ($nameLength === 0 || $pos + $nameLength > strlen($raw)) {
+            return null;
+        }
+        $name = substr($raw, $pos, $nameLength);
+        $pos += $nameLength;
+
+        return $name;
+    }
+
+    private function compressorFor(string $name): ?CompressorInterface
+    {
+        if ($name === $this->compressor->name()) {
+            return $this->compressor;
+        }
+
+        if (!array_key_exists($name, $this->compressors)) {
+            $this->compressors[$name] = match (true) {
+                $name === 'gzip' && function_exists('gzuncompress') => new GzipCompressor(),
+                $name === 'zstd' && function_exists('zstd_uncompress') => new ZstdCompressor(),
+                default => null,
+            };
+        }
+
+        return $this->compressors[$name];
+    }
+
+    private static function assertName(string $name, string $what): void
+    {
+        if ($name === '' || strlen($name) > 255) {
+            throw new InvalidArgumentException("{$what} name must be 1-255 bytes long.");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------
+
+    /**
+     * TTL in seconds; for a null TTL the default TTL (where 0 means "never expire").
+     */
+    private function resolveTtl(null|int|DateInterval $ttl): int
     {
         if ($ttl === null) {
             return $this->defaultTtl;
         }
 
         if ($ttl instanceof DateInterval) {
-            return max(0, (int)(new \DateTimeImmutable())->add($ttl)->format('U') - time());
+            $now = $this->clock->now();
+            return $now->add($ttl)->getTimestamp() - $now->getTimestamp();
         }
 
-        return (int)$ttl;
+        return $ttl;
     }
 
-    private function lockFor(string $key): Lock
+    private function expiresAt(int $seconds): int
     {
-        $hash = md5($key);
-        $dir = $this->lockPath . '/' . substr($hash, 0, 2);
-
-        if (!is_dir($dir)) {
-            if (!mkdir($dir, 0770, true) && !is_dir($dir)) {
-                error_log("Failed to create lock subdirectory: {$dir}");
-            }
-        }
-
-        return new Lock($dir . '/' . $hash . '.lock');
+        return $seconds > 0 ? $this->now() + $seconds : 0;
     }
 
-    private function log(string $level, string $message): void
+    /**
+     * How long storages keep an entry: until the end of its stale windows.
+     */
+    private function physicalTtl(int $expires, int $swr, int $sei): int
     {
-        if ($this->logger) {
-            $this->logger->log($level, $message);
+        if ($expires === 0) {
+            return 0;
         }
+
+        return max(1, $expires + max($swr, $sei) - $this->now());
+    }
+
+    private function now(): int
+    {
+        return $this->clock->now()->getTimestamp();
+    }
+
+    /**
+     * @param iterable<mixed> $keys
+     * @return list<string>
+     */
+    private function normalizeKeys(iterable $keys): array
+    {
+        $list = [];
+        foreach ($keys as $key) {
+            $list[] = KeyValidator::normalize($key);
+        }
+        return $list;
+    }
+
+    /**
+     * @param string|list<string> $tags
+     * @return list<string>
+     */
+    private function normalizeTags(string|array $tags): array
+    {
+        $tags = is_string($tags) ? [$tags] : $tags;
+        if ($tags === []) {
+            throw new InvalidArgument('At least one tag is required');
+        }
+
+        $result = [];
+        foreach ($tags as $tag) {
+            $tag = KeyValidator::normalize($tag);
+            KeyValidator::assert(self::TAG_VERSION_PREFIX . $tag);
+            $result[$tag] = $tag;
+        }
+        ksort($result, SORT_STRING);
+
+        return array_values($result);
+    }
+
+    private function failure(string $level, string $message, ?string $key, Throwable $e): void
+    {
+        $this->stats['errors']++;
+        $context = ['exception' => $e, 'error' => $e->getMessage()];
+        if ($key !== null) {
+            $context['key'] = $key;
+        }
+        $this->log($level, $message . ': {error}', $context);
+    }
+
+    /**
+     * @param array<string, mixed> $context
+     */
+    private function log(string $level, string $message, array $context = []): void
+    {
+        $this->logger?->log($level, 'EasyCache: ' . $message, $context);
     }
 }

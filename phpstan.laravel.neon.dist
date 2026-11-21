@@ -1,0 +1,11 @@
+# Static analysis of the Laravel integration. Requires:
+#   composer require --dev orchestra/testbench larastan/larastan
+includes:
+    - vendor/larastan/larastan/extension.neon
+
+parameters:
+    level: 8
+    paths:
+        - src/Laravel
+    tmpDir: .phpstan
+    treatPhpDocTypesAsCertain: false

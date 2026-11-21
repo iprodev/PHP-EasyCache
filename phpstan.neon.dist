@@ -1,0 +1,9 @@
+parameters:
+    level: 8
+    paths:
+        - src
+    excludePaths:
+        # Analysed by phpstan.laravel.neon.dist (needs Laravel + Larastan installed)
+        - src/Laravel
+    tmpDir: .phpstan
+    treatPhpDocTypesAsCertain: false

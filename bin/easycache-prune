@@ -1,20 +1,79 @@
 #!/usr/bin/env php
 <?php
+
 declare(strict_types=1);
 
-require __DIR__ . '/../vendor/autoload.php';
-
-use Iprodev\EasyCache\Cache\MultiTierCache;
-use Iprodev\EasyCache\Storage\FileStorage;
-use Iprodev\EasyCache\Serialization\NativeSerializer;
-use Iprodev\EasyCache\Compression\NullCompressor;
-
-// Usage: bin/easycache-prune /path/to/cache
-$path = $argv[1] ?? null;
-if (!$path) {
-    fwrite(STDERR, "Usage: easycache-prune /path/to/cache\n");
+// Locate the Composer autoloader whether the package is the root project or
+// installed as a dependency (vendor/bin proxy or vendor/iprodev/php-easycache/bin).
+$autoloaders = array_filter([
+    $GLOBALS['_composer_autoload_path'] ?? null,
+    __DIR__ . '/../vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+]);
+$loaded = false;
+foreach ($autoloaders as $autoload) {
+    if (is_string($autoload) && is_file($autoload)) {
+        require $autoload;
+        $loaded = true;
+        break;
+    }
+}
+if (!$loaded) {
+    fwrite(STDERR, "easycache-prune: unable to find the Composer autoloader.\n");
     exit(1);
 }
-$cache = new MultiTierCache([ new FileStorage($path) ], new NativeSerializer(), new NullCompressor(), 0);
-$count = $cache->prune();
+
+use Iprodev\EasyCache\Storage\FileStorage;
+
+$usage = <<<TXT
+Usage: easycache-prune <cache-path> [--ext=.cache] [--shards=2]
+
+Deletes expired entries, entries in an unknown format and orphaned temporary
+files from a FileStorage directory. Run it from cron, e.g.:
+
+  0 * * * * /path/to/vendor/bin/easycache-prune /path/to/cache
+
+TXT;
+
+$path = null;
+$ext = '.cache';
+$shards = 2;
+
+foreach (array_slice($argv, 1) as $arg) {
+    if ($arg === '-h' || $arg === '--help') {
+        fwrite(STDOUT, $usage);
+        exit(0);
+    }
+    if (str_starts_with($arg, '--ext=')) {
+        $ext = substr($arg, 6);
+    } elseif (str_starts_with($arg, '--shards=')) {
+        $shards = (int) substr($arg, 9);
+    } elseif (str_starts_with($arg, '-')) {
+        fwrite(STDERR, "Unknown option: {$arg}\n\n" . $usage);
+        exit(1);
+    } elseif ($path === null) {
+        $path = $arg;
+    } else {
+        fwrite(STDERR, $usage);
+        exit(1);
+    }
+}
+
+if ($path === null) {
+    fwrite(STDERR, $usage);
+    exit(1);
+}
+
+if (!is_dir($path)) {
+    fwrite(STDERR, "easycache-prune: directory not found: {$path}\n");
+    exit(1);
+}
+
+try {
+    $count = (new FileStorage($path, $ext, $shards))->prune();
+} catch (Throwable $e) {
+    fwrite(STDERR, 'easycache-prune: ' . $e->getMessage() . "\n");
+    exit(1);
+}
+
 echo "Pruned {$count} expired entries.\n";

@@ -94,4 +94,47 @@ class SerializerTest extends TestCase
         $this->expectException(\JsonException::class);
         $serializer->deserialize('invalid json {]');
     }
+
+    public function testNativeSerializerRoundTripsFalse(): void
+    {
+        $serializer = new NativeSerializer();
+        $this->assertFalse($serializer->deserialize($serializer->serialize(false)));
+    }
+
+    public function testNativeSerializerThrowsOnInvalidPayload(): void
+    {
+        $this->expectException(\UnexpectedValueException::class);
+        (new NativeSerializer())->deserialize('{"not":"php"}');
+    }
+
+    public function testNativeSerializerAllowedClasses(): void
+    {
+        $payload = serialize([new \ArrayObject([1]), new \SplStack()]);
+
+        $none = (new NativeSerializer(false))->deserialize($payload);
+        $this->assertInstanceOf(\__PHP_Incomplete_Class::class, $none[0]);
+
+        $some = (new NativeSerializer([\ArrayObject::class]))->deserialize($payload);
+        $this->assertInstanceOf(\ArrayObject::class, $some[0]);
+        $this->assertInstanceOf(\__PHP_Incomplete_Class::class, $some[1]);
+    }
+
+    public function testNativeSerializerMaxDepth(): void
+    {
+        $deep = [[[[['x']]]]];
+        $this->expectException(\UnexpectedValueException::class);
+        (new NativeSerializer(true, 2))->deserialize(serialize($deep));
+    }
+
+    public function testJsonSerializerPreservesFloats(): void
+    {
+        $serializer = new JsonSerializer();
+        $this->assertSame(1.0, $serializer->deserialize($serializer->serialize(1.0)));
+    }
+
+    public function testJsonSerializerTurnsObjectsIntoArrays(): void
+    {
+        $serializer = new JsonSerializer();
+        $this->assertSame(['a' => 1], $serializer->deserialize($serializer->serialize((object) ['a' => 1])));
+    }
 }

@@ -126,4 +126,36 @@ class CompressorTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $compressor->decompress('invalid compressed data');
     }
+
+    public function testGzipRejectsPayloadsAboveTheLimit(): void
+    {
+        if (!function_exists('gzcompress')) {
+            $this->markTestSkipped('Gzip extension not available');
+        }
+
+        $bomb = (new GzipCompressor(9))->compress(str_repeat("\0", 2 * 1024 * 1024));
+        $this->expectException(\RuntimeException::class);
+        (new GzipCompressor(9, 1024 * 1024))->decompress($bomb);
+    }
+
+    public function testGzipLevelIsClamped(): void
+    {
+        if (!function_exists('gzcompress')) {
+            $this->markTestSkipped('Gzip extension not available');
+        }
+
+        $data = str_repeat('abc', 100);
+        $this->assertSame($data, (new GzipCompressor(42))->decompress((new GzipCompressor(-3))->compress($data)));
+    }
+
+    public function testZstdRejectsPayloadsAboveTheLimit(): void
+    {
+        if (!function_exists('zstd_compress')) {
+            $this->markTestSkipped('Zstd extension not available');
+        }
+
+        $payload = (new ZstdCompressor())->compress(str_repeat('a', 2 * 1024 * 1024));
+        $this->expectException(\RuntimeException::class);
+        (new ZstdCompressor(3, 1024 * 1024))->decompress($payload);
+    }
 }

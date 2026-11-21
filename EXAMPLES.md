@@ -403,7 +403,8 @@ class RateLimiter
 
     public function attempt(string $key, int $maxAttempts, int $decay): bool
     {
-        $cacheKey = "rate_limit_{$key}";
+        // Hash the identifier: IPv6 addresses contain ':' which is not allowed in keys
+        $cacheKey = 'rate_limit_' . sha1($key);
         $attempts = $this->cache->get($cacheKey) ?? 0;
 
         if ($attempts >= $maxAttempts) {
@@ -416,13 +417,13 @@ class RateLimiter
 
     public function remaining(string $key, int $maxAttempts): int
     {
-        $attempts = $this->cache->get("rate_limit_{$key}") ?? 0;
+        $attempts = $this->cache->get('rate_limit_' . sha1($key)) ?? 0;
         return max(0, $maxAttempts - $attempts);
     }
 
     public function reset(string $key): void
     {
-        $this->cache->delete("rate_limit_{$key}");
+        $this->cache->delete('rate_limit_' . sha1($key));
     }
 }
 
@@ -439,6 +440,9 @@ if (!$limiter->attempt($ip, 100, 3600)) {
 // Process request...
 ```
 
+> ⚠️ `get()` + `set()` is not atomic, so this limiter is approximate under
+> heavy concurrency. Use Redis `INCR`/`EXPIRE` directly when limits must be exact.
+
 ### API Token Rate Limiting
 
 ```php
@@ -448,7 +452,8 @@ class ApiRateLimiter
 
     public function checkLimit(string $token, string $endpoint): array
     {
-        $key = "api_limit_{$token}_{$endpoint}";
+        // Endpoints contain '/', so hash them into the key
+        $key = 'api_limit_' . sha1($token . '|' . $endpoint);
         $data = $this->cache->get($key) ?? [
             'requests' => 0,
             'reset_at' => time() + 3600
@@ -487,59 +492,37 @@ class ApiRateLimiter
 
 ### Prevent Concurrent Execution
 
+Use the lock providers that ship with EasyCache instead of building locks on
+`get()`/`set()` (which is not atomic: two processes can both see "no lock").
+
 ```php
-class CriticalSection
-{
-    private MultiTierCache $cache;
+use Iprodev\EasyCache\Lock\FileLockProvider;
+use Iprodev\EasyCache\Lock\RedisLockProvider;
 
-    public function execute(string $lockKey, callable $callback, int $timeout = 30): mixed
-    {
-        $acquired = $this->acquireLock($lockKey, $timeout);
-        
-        if (!$acquired) {
-            throw new \RuntimeException("Could not acquire lock for: {$lockKey}");
-        }
+// One server: flock() based locks
+$locks = new FileLockProvider('/var/lib/myapp/locks');
 
-        try {
-            return $callback();
-        } finally {
-            $this->releaseLock($lockKey);
-        }
-    }
+// Several servers: Redis locks (SET NX PX, released only by their owner)
+$locks = new RedisLockProvider($redis, 'myapp:lock:', ttlMs: 60000);
 
-    private function acquireLock(string $key, int $timeout): bool
-    {
-        $lockKey = "lock_{$key}";
-        $lockValue = uniqid('', true);
-        $start = time();
+$lock = $locks->create('invoice_generation');
 
-        while (time() - $start < $timeout) {
-            $existing = $this->cache->get($lockKey);
-            
-            if ($existing === null) {
-                $this->cache->set($lockKey, $lockValue, $timeout);
-                return true;
-            }
-
-            usleep(100000); // Wait 100ms
-        }
-
-        return false;
-    }
-
-    private function releaseLock(string $key): void
-    {
-        $this->cache->delete("lock_{$key}");
-    }
+if (!$lock->acquire(blocking: true, timeout: 5.0)) {
+    throw new \RuntimeException('Invoice generation is already running');
 }
 
-// Usage
-$critical = new CriticalSection($cache);
+try {
+    generateInvoices(); // only one process at a time
+} finally {
+    $lock->release();
+}
+```
 
-$critical->execute('invoice_generation', function() {
-    // Only one process at a time can execute this
-    generateInvoices();
-});
+`getOrSetSWR()` and `remember()` already use these locks internally to make
+sure concurrent cache misses run the producer only once:
+
+```php
+$cache = new MultiTierCache([$redisStore], lockProvider: $locks);
 ```
 
 ---
@@ -704,58 +687,23 @@ class CacheWarmer
 }
 ```
 
-### Cache Tags (Manual Implementation)
+### Cache Tags
+
+Tags are built in since 3.1:
 
 ```php
-class TaggedCache
-{
-    private MultiTierCache $cache;
+// Store with tags
+$cache->tags(['products', 'category-electronics'])->set('product_123', $product, 3600);
 
-    public function tags(array $tags): self
-    {
-        $this->currentTags = $tags;
-        return $this;
-    }
+// Read with the same tags (order does not matter)
+$product = $cache->tags(['category-electronics', 'products'])->get('product_123');
 
-    public function put(string $key, $value, int $ttl): bool
-    {
-        // Store the actual value
-        $result = $this->cache->set($key, $value, $ttl);
-
-        // Store tag references
-        foreach ($this->currentTags as $tag) {
-            $tagKey = "tag_{$tag}";
-            $keys = $this->cache->get($tagKey) ?? [];
-            $keys[] = $key;
-            $this->cache->set($tagKey, array_unique($keys), $ttl);
-        }
-
-        return $result;
-    }
-
-    public function flush(): void
-    {
-        foreach ($this->currentTags as $tag) {
-            $tagKey = "tag_{$tag}";
-            $keys = $this->cache->get($tagKey) ?? [];
-            
-            foreach ($keys as $key) {
-                $this->cache->delete($key);
-            }
-            
-            $this->cache->delete($tagKey);
-        }
-    }
-}
-
-// Usage
-$taggedCache = new TaggedCache($cache);
-$taggedCache->tags(['products', 'category:electronics'])
-    ->put('product_123', $product, 3600);
-
-// Flush all products in electronics category
-$taggedCache->tags(['category:electronics'])->flush();
+// Invalidate everything tagged "category-electronics"
+$cache->invalidateTags('category-electronics');
 ```
+
+Invalidated entries are not deleted; they become unreachable and expire
+through their TTL (or `prune()`).
 
 ---
 

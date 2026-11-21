@@ -273,6 +273,42 @@ composer test -- --coverage-html coverage
 ./vendor/bin/phpunit --filter testSetAndGet
 ```
 
+#### Integration backends
+
+Redis, MySQL and PostgreSQL tests are skipped unless these variables point to
+a server (the tests use Redis database 15 and their own tables):
+
+```bash
+docker run -d -p 6379:6379 redis:7-alpine
+docker run -d -p 3306:3306 -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=easycache mysql:8.4
+docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=easycache postgres:16-alpine
+
+EASYCACHE_TEST_REDIS_HOST=127.0.0.1 \
+EASYCACHE_TEST_MYSQL_DSN="mysql:host=127.0.0.1;dbname=easycache" \
+EASYCACHE_TEST_MYSQL_USER=root EASYCACHE_TEST_MYSQL_PASSWORD=secret \
+EASYCACHE_TEST_PGSQL_DSN="pgsql:host=127.0.0.1;dbname=easycache" \
+EASYCACHE_TEST_PGSQL_USER=postgres EASYCACHE_TEST_PGSQL_PASSWORD=secret \
+composer test
+```
+
+APCu tests need `apc.enable_cli=1` (e.g. `php -d apc.enable_cli=1 vendor/bin/phpunit`).
+
+#### Laravel integration
+
+Laravel is not a dependency of the library. To run the Laravel tests and the
+Larastan analysis locally (do not commit the change to `composer.json`):
+
+```bash
+composer require --dev --no-update "orchestra/testbench:^10.0 || ^11.0" "larastan/larastan:^3.0"
+composer update
+composer test:laravel
+composer stan:laravel
+```
+
+New storage backends should extend `tests/Storage/StorageContractTestCase.php`,
+which checks the behaviour every storage must have. Use `FrozenClock` instead
+of `sleep()` for time-dependent tests.
+
 ### Test Coverage Requirements
 
 - New features: **minimum 80% coverage**

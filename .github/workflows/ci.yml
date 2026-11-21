@@ -1,17 +1,157 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  quality:
+    name: Code style & static analysis
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        php: ['8.1', '8.2', '8.3', '8.4']
     steps:
       - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: apcu, redis, zstd
+          coverage: none
+
+      - uses: ramsey/composer-install@v3
+
+      - name: PHP_CodeSniffer (PSR-12)
+        run: composer cs
+
+      - name: PHPStan (level 8)
+        run: composer stan
+
+      - name: Composer audit (runtime dependencies)
+        run: composer audit --no-dev
+
+  tests:
+    name: Tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4']
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-only-password
+          MYSQL_DATABASE: easycache
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pci-only-password"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: easycache
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+
+    env:
+      EASYCACHE_TEST_REDIS_HOST: 127.0.0.1
+      EASYCACHE_TEST_REDIS_PORT: 6379
+      EASYCACHE_TEST_MYSQL_DSN: mysql:host=127.0.0.1;port=3306;dbname=easycache
+      EASYCACHE_TEST_MYSQL_USER: root
+      EASYCACHE_TEST_MYSQL_PASSWORD: ci-only-password
+      EASYCACHE_TEST_PGSQL_DSN: pgsql:host=127.0.0.1;port=5432;dbname=easycache
+      EASYCACHE_TEST_PGSQL_USER: postgres
+      EASYCACHE_TEST_PGSQL_PASSWORD: ci-only-password
+
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-      - run: composer install --prefer-dist --no-interaction
-      - run: composer cs
-      - run: composer stan
-      - run: composer test
+          extensions: apcu, redis, zstd, zlib, pdo_sqlite, pdo_mysql, pdo_pgsql
+          ini-values: apc.enabled=1, apc.enable_cli=1
+          coverage: ${{ matrix.php == '8.3' && 'pcov' || 'none' }}
+
+      - uses: ramsey/composer-install@v3
+
+      - name: Run tests
+        if: matrix.php != '8.3'
+        run: vendor/bin/phpunit --colors=always
+
+      - name: Run tests with coverage
+        if: matrix.php == '8.3'
+        run: vendor/bin/phpunit --colors=always --coverage-text --coverage-clover=coverage.xml
+
+      - name: Upload coverage report
+        if: matrix.php == '8.3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  laravel:
+    name: Laravel integration (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: redis, pdo_sqlite
+          coverage: none
+
+      # Laravel is not a dependency of the library; supported Laravel versions
+      # without known advisories are installed for this job only.
+      - name: Add Laravel test tooling
+        run: composer require --dev --no-update "orchestra/testbench:^10.0 || ^11.0" "larastan/larastan:^3.0"
+
+      - uses: ramsey/composer-install@v3
+
+      - name: PHPStan (Laravel integration, Larastan)
+        run: composer stan:laravel
+
+      - name: Run Laravel tests
+        run: composer test:laravel
+
+  lowest:
+    name: Tests (PHP 8.1, lowest dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          coverage: none
+
+      - uses: ramsey/composer-install@v3
+        with:
+          dependency-versions: lowest
+
+      - name: Run tests
+        run: vendor/bin/phpunit --colors=always

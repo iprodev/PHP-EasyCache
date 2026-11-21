@@ -3,15 +3,17 @@
 **EasyCache** is a pragmatic, batteries‑included cache library that implements the **PSR‑16 Simple Cache** interface and adds production‑grade features on top:
 
 - 🚀 Multi‑tier storage: **APCu, Redis, File, and PDO (MySQL/PostgreSQL/SQLite)**
-- 🔒 **Atomic writes** and **read locks** for file storage
-- ⚡ **Full SWR** (*stale‑while‑revalidate* + *stale‑if‑error*), with non‑blocking per‑key locks
-- 🔧 **Pluggable Serializer & Compressor** (PHP/JSON + None/Gzip/Zstd)
+- 🔒 **Atomic writes** for file storage, **stampede protection** with per‑key locks (file or Redis)
+- ⚡ **Full SWR** (*stale‑while‑revalidate* + *stale‑if‑error*)
+- 🛡️ **Tamper‑proof entries**: optional HMAC‑SHA256 signing, no `unserialize()` of entry headers
+- 🔧 **Pluggable Serializer & Compressor** (PHP/JSON + None/Gzip/Zstd or your own)
 - 🔄 Automatic **backfill** between tiers (e.g., a Redis hit is written back to APCu)
-- 🎯 First‑class **Laravel** integration via a Service Provider & Facade
-- ✅ **Comprehensive test coverage** with PHPUnit
-- 🛡️ **Improved error handling** with detailed logging support
+- 📦 **Batch operations** (`MGET`, `IN (...)`, `apcu_fetch([...])`), **tags**, `remember()`, `forever()`, stats
+- 🎯 First‑class **Laravel** integration: Service Provider, Facade and artisan commands
+- ✅ Tested against File, SQLite, MySQL, PostgreSQL, Redis (phpredis + Predis) and APCu
 
-> Version: **v3.0.1** — Requires **PHP 8.1+** and `psr/simple-cache:^3`.
+> Version: **v3.1.0** — Requires **PHP 8.1+** and `psr/simple-cache` `^2 || ^3`.
+> Upgrading from 3.0? Read [MIGRATION.md](MIGRATION.md).
 
 📖 **Documentation in other languages:**
 - [فارسی (Persian)](README_FA.md)
@@ -52,13 +54,14 @@ $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 $redisStore = new RedisStorage($redis, 'ec:');
 
-$file  = new FileStorage(__DIR__.'/cache');
+$file  = new FileStorage('/var/cache/myapp');
 
 $cache = new MultiTierCache(
     [$apcu, $redisStore, $file],
     new NativeSerializer(),
     new GzipCompressor(3),
-    defaultTtl: 600
+    defaultTtl: 600,
+    signingKey: getenv('EASYCACHE_SIGNING_KEY') ?: null, // secret >= 16 bytes, recommended
 );
 
 // PSR-16 API
@@ -76,6 +79,13 @@ Organize your cache in tiers from fastest to slowest. The library automatically:
 - Reads from the fastest available tier
 - Writes to all tiers
 - Backfills faster tiers when data is found in slower tiers
+- Skips expired copies in fast tiers when a slower tier holds a fresher copy
+
+> ⚠️ **Several servers?** APCu (and any other server‑local tier) is not shared:
+> a `set()`/`delete()` on server A does not touch server B's APCu. Cap the TTL
+> of the local tier (`new ApcuStorage('app:', maxTtl: 60)`) so updates from
+> other servers become visible quickly, and use `RedisLockProvider` for
+> stampede protection across servers.
 
 ```php
 // Example: Memory -> Redis -> Database
@@ -93,7 +103,7 @@ $cache = new MultiTierCache(
 
 ### 2. Stale-While-Revalidate (SWR)
 
-When data expires but is still inside the SWR window, **stale data is served instantly** while a **refresh happens in the background**. This prevents cache stampedes and ensures fast response times.
+When data expires but is still inside the SWR window, **stale data is served** while the entry is refreshed by a single process. This prevents cache stampedes and keeps response times low.
 
 ```php
 $result = $cache->getOrSetSWR(
@@ -110,27 +120,68 @@ $result = $cache->getOrSetSWR(
 ```
 
 **How it works:**
-1. If data is fresh, it's returned immediately
-2. If data is expired but within SWR window:
-   - Stale data is returned instantly
-   - Background refresh is triggered (non-blocking)
-3. If refresh fails, stale data continues to be served (within staleIfError window)
+1. **Fresh** entry → returned immediately.
+2. **Expired, within `swrSeconds`** → one process refreshes it, the others get the stale value without waiting.
+   - `mode: 'sync'` (default): the refreshing process returns the **new** value.
+   - `mode: 'defer'`: the stale value is returned and the refresh runs after the response is sent
+     (`fastcgi_finish_request()` / LiteSpeed; elsewhere it falls back to `sync`).
+   - If the refresh fails, the stale value is served.
+3. **Expired, within `staleIfErrorSeconds` only** → the value is recomputed; the stale value is served
+   **only if the producer throws**.
+4. **Missing** → computed under a per‑key lock, so concurrent requests run the producer only once.
 
-### 3. Pluggable Serialization
+A `null` TTL uses the default TTL (`0` = never expire); a TTL `<= 0` computes the value without caching it.
+`null` results are cached like any other value.
+
+### 3. Security: Signed Entries
+
+Anyone who can write to a cache backend (a Redis without password, a shared
+cache directory, a shared database table...) could otherwise plant entries.
+EasyCache never runs `unserialize()` on entry headers, and with a signing key
+every entry carries an HMAC‑SHA256 signature: unsigned or modified entries
+are rejected **before** they are deserialized.
+
+```php
+$cache = new MultiTierCache(
+    [$redisStore],
+    new NativeSerializer(allowedClasses: [UserDto::class]), // or false: no objects at all
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],             // >= 16 random bytes
+);
+```
+
+### 4. More Helpers
+
+```php
+// Compute once, cache for 10 minutes
+$user = $cache->remember('user-42', 600, fn () => $repo->find(42));
+
+// No expiry
+$cache->forever('feature-flags', $flags);
+
+// Tags: invalidate groups of entries at once
+$cache->tags(['users'])->set('user-42', $user);
+$cache->tags(['users'])->get('user-42');
+$cache->invalidateTags('users');
+
+// Hit/miss counters of this instance
+$cache->getStats(); // ['hits' => .., 'misses' => .., 'hit_ratio' => 0.93, ...]
+```
+
+### 5. Pluggable Serialization
 
 Choose the serializer that fits your needs:
 
 ```php
-// PHP Native Serializer (supports objects)
+// PHP Native Serializer (supports objects; restrict the classes it may create)
 use Iprodev\EasyCache\Serialization\NativeSerializer;
-$cache = new MultiTierCache([$storage], new NativeSerializer());
+$cache = new MultiTierCache([$storage], new NativeSerializer(allowedClasses: true));
 
-// JSON Serializer (portable, faster for simple data)
+// JSON Serializer (portable, never creates objects; objects come back as arrays)
 use Iprodev\EasyCache\Serialization\JsonSerializer;
 $cache = new MultiTierCache([$storage], new JsonSerializer());
 ```
 
-### 4. Pluggable Compression
+### 6. Pluggable Compression
 
 Save memory and disk space:
 
@@ -148,6 +199,11 @@ use Iprodev\EasyCache\Compression\ZstdCompressor;
 $cache = new MultiTierCache([$storage], $serializer, new ZstdCompressor(3));
 ```
 
+The compressor name is stored with each entry, so switching compressors keeps
+existing gzip/zstd entries readable. Decompression is capped (64 MB by default)
+to protect against decompression bombs. Custom compressors implement
+`CompressorInterface` with a unique `name()`.
+
 ---
 
 ## 💾 Storage Backends
@@ -159,15 +215,17 @@ Fast in-memory cache, perfect as the first tier.
 use Iprodev\EasyCache\Storage\ApcuStorage;
 
 $storage = new ApcuStorage(
-    prefix: 'myapp:' // Namespace your keys
+    prefix: 'myapp:', // Namespace your keys (required, must not be empty)
+    maxTtl: 60        // Optional cap for entries in this server-local tier
 );
 ```
 
 **Features:**
 - Lightning-fast memory access
-- Shared between PHP-FPM workers
+- Shared between PHP-FPM workers (but not between servers)
 - Automatic expiration
 - Safe clear() that only deletes prefixed keys
+- In CLI, requires `apc.enable_cli=1`
 
 ### Redis Storage
 Network-based cache with persistence options.
@@ -186,9 +244,9 @@ $storage = new RedisStorage($redis, 'myapp:');
 ```
 
 **Features:**
-- Works with phpredis or predis
-- TTL support with SETEX
-- Safe clear() with prefix scanning
+- Works with phpredis or predis (including client-level key prefixes)
+- TTL support with SETEX, batch reads with MGET and pipelined writes
+- Safe clear(): non-blocking `SCAN` over the (escaped) prefix only; an empty prefix is rejected
 - Automatic expiration
 
 ### File Storage
@@ -198,23 +256,28 @@ Reliable disk-based cache with sharding.
 use Iprodev\EasyCache\Storage\FileStorage;
 
 $storage = new FileStorage(
-    path: '/var/cache/myapp',  // Cache directory
-    ext: '.cache',              // File extension
-    shards: 2                   // Directory sharding level (0-3)
+    path: '/var/cache/myapp',  // Cache directory (keep it outside the web root)
+    ext: '.cache',             // File extension
+    shards: 2,                 // Directory sharding level (0-3)
+    fileMode: 0640,            // File permissions (independent of umask)
+    dirMode: 0770              // Directory permissions
 );
 ```
 
 **Features:**
-- Atomic writes (temp file + rename)
-- Read locks with flock()
-- Directory sharding for performance
-- Configurable file extension
+- Atomic writes (temp file + rename), symlink-safe temp files
+- Expiry stored in each file: expired files are ignored and removed by `prune()`
+- Directory sharding for performance; directories are only created on write
+- `clear()` only deletes files matching the storage's own naming scheme and never follows symlinks
 
 **Directory Sharding Example:**
 ```
-With shards=2, key "user_123" (hash: a1b2c3d4):
-/var/cache/myapp/a1/b2/a1b2c3d4.cache
+With shards=2, key "user_123" (xxh128 hash: a1b2c3d4...):
+/var/cache/myapp/a1/b2/a1b2c3d4....cache
 ```
+
+Expired files are not deleted automatically: schedule `prune()` (or
+`vendor/bin/easycache-prune /var/cache/myapp`, or `php artisan easycache:prune`).
 
 ### PDO Storage
 SQL database cache for shared environments.
@@ -227,6 +290,9 @@ $storage = new PdoStorage($pdo, 'easycache');
 
 // Create table (run once during setup)
 $storage->ensureTable();
+
+// Tables created by EasyCache < 3.1 on MySQL: lift the 64KB limit and make keys case-sensitive
+$storage->upgradeSchema();
 ```
 
 **Supported databases:**
@@ -237,8 +303,10 @@ $storage->ensureTable();
 **Features:**
 - TTL support with expiration check
 - Prune expired items with `prune()`
-- UPSERT support (INSERT ... ON CONFLICT)
-- Indexed queries for performance
+- UPSERT support (`ON CONFLICT` / `ON DUPLICATE KEY`), binary-safe payloads (`LONGBLOB`/`BYTEA`/`BLOB`)
+- Works with any PDO error mode and never changes the connection's settings
+- Keys longer than 64 bytes are stored hashed, so they fit the key column
+- Indexed queries and batch reads with `IN (...)`
 
 ---
 
@@ -252,7 +320,7 @@ use Iprodev\EasyCache\Storage\FileStorage;
 use Iprodev\EasyCache\Serialization\NativeSerializer;
 use Iprodev\EasyCache\Compression\NullCompressor;
 
-$storage = new FileStorage(__DIR__ . '/cache');
+$storage = new FileStorage('/var/cache/myapp');
 $cache = new MultiTierCache([$storage], new NativeSerializer(), new NullCompressor());
 
 // Set with 1 hour TTL
@@ -375,8 +443,8 @@ $cache = new MultiTierCache(
 $pruned = $cache->prune();
 echo "Pruned {$pruned} expired items";
 
-// For PDO storage, this removes expired rows
-// For File/APCu/Redis, expiration is automatic
+// File and PDO storages delete expired entries here;
+// APCu and Redis expire entries on their own
 ```
 
 ---
@@ -395,29 +463,23 @@ composer require iprodev/php-easycache
 php artisan vendor:publish --tag=easycache-config
 ```
 
-3. **Configure in `config/easycache.php`:**
-```php
-return [
-    'drivers' => ['apcu', 'redis', 'file'],
-    'default_ttl' => 600,
-    
-    'serializer' => [
-        'driver' => 'php', // php|json
-    ],
-    
-    'compressor' => [
-        'driver' => 'gzip', // none|gzip|zstd
-        'level' => 5,
-    ],
-    
-    'redis' => [
-        'host' => env('REDIS_HOST', '127.0.0.1'),
-        'port' => env('REDIS_PORT', 6379),
-        'password' => env('REDIS_PASSWORD', null),
-        'database' => env('REDIS_CACHE_DB', 1),
-    ],
-];
+3. **Configure in `.env` (or `config/easycache.php`):**
+```env
+EASYCACHE_DRIVERS=apcu,redis,file   # default: file
+EASYCACHE_DEFAULT_TTL=600
+EASYCACHE_REDIS_HOST=127.0.0.1
+EASYCACHE_REDIS_PASSWORD=secret
+EASYCACHE_LOCK_DRIVER=redis         # file|redis|none
+EASYCACHE_SERIALIZER=php            # php|json
+EASYCACHE_COMPRESSOR=gzip           # none|gzip|zstd
 ```
+
+- Entries are **signed** with a key derived from `APP_KEY` (set `EASYCACHE_SIGNING_KEY`
+  to use your own, `EASYCACHE_SIGN=false` to disable).
+- Drivers that cannot be initialised (extension missing, Redis down...) are skipped with
+  a warning in the log (`EASYCACHE_SKIP_UNAVAILABLE=false` to fail instead).
+- The cache is available as `app('easycache')`, the `EasyCache` facade, or by type-hinting
+  `Iprodev\EasyCache\Cache\MultiTierCache`.
 
 ### Using the Facade
 
@@ -446,35 +508,39 @@ EasyCache::setMultiple([
 
 ### Artisan Commands
 
-The package includes a prune command:
-
 ```bash
-# Prune expired cache items
+# Delete expired entries (file and PDO tiers)
 php artisan easycache:prune
 
-# Add to your scheduler (app/Console/Kernel.php)
-$schedule->command('easycache:prune')->daily();
+# Delete every EasyCache entry
+php artisan easycache:clear
+```
+
+```php
+// Schedule pruning (routes/console.php or app/Console/Kernel.php)
+Schedule::command('easycache:prune')->hourly();
 ```
 
 ---
 
 ## 🔑 Key Rules (PSR‑16)
 
-- **Allowed characters:** `[A-Za-z0-9_.]`
-- **Max length:** 64 characters
+- **Allowed characters:** printable ASCII (`!` to `~`) except the reserved characters
 - **Reserved characters (not allowed):** `{ } ( ) / \ @ :`
+- **Not allowed:** whitespace, control characters (including newlines) and non-ASCII bytes
+- **Max length:** 255 bytes
 
 ```php
 // Valid keys
 $cache->set('user_123', $data);
 $cache->set('posts.latest', $data);
-$cache->set('CamelCase', $data);
+$cache->set('user-3f2a9c1e-77b2-4f3b-9a51-1c2d3e4f5a6b', $data);
 
-// Invalid keys (will throw InvalidArgument exception)
+// Invalid keys (will throw Psr\SimpleCache\InvalidArgumentException)
 $cache->set('user:123', $data);    // Contains :
 $cache->set('user/123', $data);    // Contains /
-$cache->set('user@123', $data);    // Contains @
-$cache->set(str_repeat('x', 65), $data); // Too long
+$cache->set('user 123', $data);    // Contains whitespace
+$cache->set(str_repeat('x', 256), $data); // Too long
 ```
 
 ---
@@ -490,9 +556,20 @@ composer test
 # Run with coverage
 composer test -- --coverage-html coverage
 
-# Run specific test suite
-./vendor/bin/phpunit --testsuite "Storage Tests"
+# Run one test class
+./vendor/bin/phpunit --filter SwrTest
 ```
+
+Integration tests for Redis, MySQL and PostgreSQL run when the corresponding
+environment variables are set (see `phpunit.xml.dist`), e.g.:
+
+```bash
+EASYCACHE_TEST_REDIS_HOST=127.0.0.1 \
+EASYCACHE_TEST_MYSQL_DSN="mysql:host=127.0.0.1;dbname=easycache" EASYCACHE_TEST_MYSQL_USER=root \
+composer test
+```
+
+APCu tests need `apc.enable_cli=1`.
 
 ### Static Analysis
 
@@ -509,60 +586,87 @@ composer cs:fix
 
 ### Test Coverage
 
-The library includes comprehensive tests for:
-- ✅ All storage backends (File, APCu, Redis, PDO)
-- ✅ Multi-tier caching with backfill
-- ✅ SWR functionality
-- ✅ Serializers (Native, JSON)
-- ✅ Compressors (Null, Gzip, Zstd)
-- ✅ Key validation
-- ✅ Lock mechanism
-- ✅ Edge cases and error handling
+The test suite covers:
+- ✅ A shared storage contract run against File, SQLite, MySQL, PostgreSQL, phpredis, Predis and APCu
+- ✅ Multi-tier caching, backfill and fall-through to fresher tiers
+- ✅ SWR and stale-if-error semantics (with a frozen PSR-20 clock, no `sleep()`)
+- ✅ Security: signed/tampered/unsigned entries, object injection attempts
+- ✅ PSR-16 compliance (data types, invalid keys for every method)
+- ✅ Stampede protection with concurrent processes
+- ✅ Serializers, compressors, key validation, file and Redis locks
+- ✅ Laravel service provider, facade and artisan commands; the CLI prune tool
 
 ---
 
 ## 🔧 Advanced Configuration
 
-### Custom Lock Path
+### Locks
+
+By default, locks are files in a private per-user directory in the system temp
+dir (mode `0700`). They only coordinate processes on one machine.
 
 ```php
+use Iprodev\EasyCache\Lock\FileLockProvider;
+use Iprodev\EasyCache\Lock\RedisLockProvider;
+
+// Custom lock directory
+$cache = new MultiTierCache([$storage], lockPath: '/var/lib/myapp/locks');
+
+// Distributed locks for several servers (SET NX PX + safe release)
 $cache = new MultiTierCache(
-    [$storage],
-    $serializer,
-    $compressor,
-    3600,
-    $logger,
-    '/custom/lock/path' // Custom lock directory
+    [$apcu, $redisStore],
+    lockProvider: new RedisLockProvider($redis, 'myapp:lock:', ttlMs: 30000),
+    lockTimeout: 10.0, // seconds to wait before computing without the lock
 );
+```
+
+### Clock
+
+All time calculations go through a PSR-20 clock, which makes expiry testable:
+
+```php
+use Iprodev\EasyCache\Clock\FrozenClock;
+
+$clock = new FrozenClock();
+$cache = new MultiTierCache([new FileStorage($dir, clock: $clock)], clock: $clock);
+$cache->set('k', 'v', 60);
+$clock->advance(61);
+$cache->get('k'); // null
 ```
 
 ### File Storage Sharding Levels
 
 ```php
-// No sharding: /cache/md5hash.cache
+// No sharding: /cache/hash.cache
 $storage = new FileStorage('/cache', '.cache', 0);
 
-// 1 level: /cache/a1/md5hash.cache
+// 1 level: /cache/a1/hash.cache
 $storage = new FileStorage('/cache', '.cache', 1);
 
-// 2 levels: /cache/a1/b2/md5hash.cache (recommended)
+// 2 levels: /cache/a1/b2/hash.cache (recommended)
 $storage = new FileStorage('/cache', '.cache', 2);
 
-// 3 levels: /cache/a1/b2/c3/md5hash.cache
+// 3 levels: /cache/a1/b2/c3/hash.cache
 $storage = new FileStorage('/cache', '.cache', 3);
 ```
 
 ### Environment Variables (Laravel)
 
-```env
-# .env file
-EASYCACHE_DRIVER=redis
-EASYCACHE_REDIS_HOST=127.0.0.1
-EASYCACHE_REDIS_PORT=6379
-EASYCACHE_REDIS_PASSWORD=secret
-EASYCACHE_REDIS_DB=1
-EASYCACHE_DEFAULT_TTL=600
-```
+| Variable | Default | Description |
+|---|---|---|
+| `EASYCACHE_DRIVERS` | `file` | Comma separated tiers: `apcu`, `redis`, `file`, `pdo` |
+| `EASYCACHE_SKIP_UNAVAILABLE` | `true` | Skip drivers that cannot be initialised |
+| `EASYCACHE_DEFAULT_TTL` | `600` | Default TTL in seconds (`0` = never expire) |
+| `EASYCACHE_SIGN` / `EASYCACHE_SIGNING_KEY` | `true` / derived from `APP_KEY` | Entry signing |
+| `EASYCACHE_LOCK_DRIVER` | `file` | `file`, `redis` or `none` |
+| `EASYCACHE_LOCK_PATH` / `EASYCACHE_LOCK_TIMEOUT` | storage path / `30` | File lock directory, lock wait in seconds |
+| `EASYCACHE_APCU_PREFIX` / `EASYCACHE_APCU_MAX_TTL` | `ec:` / `60` | APCu prefix and TTL cap |
+| `EASYCACHE_REDIS_CLIENT` | `phpredis` | `phpredis` or `predis` |
+| `EASYCACHE_REDIS_HOST` / `_PORT` / `_PASSWORD` / `_DB` / `_PREFIX` / `_SCHEME` / `_TIMEOUT` | | Redis connection |
+| `EASYCACHE_FILE_PATH` | `storage/framework/cache/easycache` | File tier directory |
+| `EASYCACHE_PDO_DSN` / `_USER` / `_PASSWORD` / `_TABLE` | SQLite in storage | PDO tier |
+| `EASYCACHE_SERIALIZER` | `php` | `php` or `json` |
+| `EASYCACHE_COMPRESSOR` / `EASYCACHE_COMPRESSION_LEVEL` | `none` / `3` | `none`, `gzip` or `zstd` |
 
 ---
 
@@ -585,11 +689,14 @@ if (!$result) {
 ```
 
 **Logged Events:**
-- Storage read/write failures
+- Storage read/write failures (storages report through the same PSR-3 logger; they never write to `error_log()`)
+- Rejected entries (unsigned or invalid signature)
 - Compression/decompression errors
 - Lock acquisition failures
-- SWR refresh errors
+- SWR refresh errors and stale-if-error fallbacks
 - Serialization errors
+
+`getStats()` exposes the number of errors next to hits and misses.
 
 ---
 
@@ -601,10 +708,11 @@ For projects upgrading from v2, use the BC wrapper:
 use Iprodev\EasyCache\EasyCache;
 
 $cache = new EasyCache([
-    'cache_path' => __DIR__ . '/cache',
+    'cache_path' => '/var/cache/myapp',   // default: a private per-user dir in the system temp dir
     'cache_extension' => '.cache',
     'cache_time' => 3600,
     'directory_shards' => 2,
+    'signing_key' => getenv('EASYCACHE_SIGNING_KEY') ?: null, // optional
 ]);
 
 // Works like v2
@@ -616,14 +724,15 @@ $value = $cache->get('key');
 
 ## 📝 Best Practices
 
-1. **Use multi-tier wisely:** APCu → Redis → File/PDO
+1. **Use multi-tier wisely:** APCu → Redis → File/PDO, with a short `maxTtl` on server-local tiers
 2. **Set appropriate TTLs:** Balance freshness vs. performance
 3. **Use SWR for expensive operations:** Prevent cache stampedes
-4. **Monitor cache hit rates:** Use logging to track performance
-5. **Schedule pruning:** For PDO storage, prune regularly
-6. **Use compression for large data:** GzipCompressor or ZstdCompressor
-7. **Namespace your keys:** Use prefixes to avoid collisions
-8. **Test error scenarios:** Ensure your app handles cache failures gracefully
+4. **Sign entries in production:** pass a `signingKey`, and restrict `NativeSerializer` classes
+5. **Protect your backends:** Redis with a password, cache directories outside the web root
+6. **Monitor cache hit rates:** `getStats()` and the PSR-3 log
+7. **Schedule pruning:** File and PDO storages need `prune()` / `easycache:prune`
+8. **Use compression for large data:** GzipCompressor or ZstdCompressor
+9. **Use RedisLockProvider** when several servers share a tier
 
 ---
 
@@ -666,5 +775,6 @@ MIT © iprodev
 ## 💬 Support
 
 - 📧 Email: support@iprodev.com
+- 🔐 Security issues: see [SECURITY.md](SECURITY.md) (please do not open public issues)
 - 🐛 Issues: [GitHub Issues](https://github.com/iprodev/php-easycache/issues)
 - 💡 Discussions: [GitHub Discussions](https://github.com/iprodev/php-easycache/discussions)

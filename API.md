@@ -1,21 +1,26 @@
 # API Reference
 
-Complete API documentation for PHP EasyCache v3.
+Complete API documentation for PHP EasyCache v3.1.
 
 ## Table of Contents
 
 - [MultiTierCache](#multitiercache)
+- [TaggedCache](#taggedcache)
 - [Storage Backends](#storage-backends)
+- [Locks](#locks)
 - [Serializers](#serializers)
 - [Compressors](#compressors)
+- [Clocks](#clocks)
 - [Utilities](#utilities)
 - [Exceptions](#exceptions)
+- [Laravel Integration](#laravel-integration)
+- [Entry Format](#entry-format)
 
 ---
 
 ## MultiTierCache
 
-The main cache class implementing PSR-16 CacheInterface.
+The main cache class implementing the PSR-16 `CacheInterface`.
 
 ### Constructor
 
@@ -26,30 +31,40 @@ public function __construct(
     ?CompressorInterface $compressor = null,
     int $defaultTtl = 3600,
     ?LoggerInterface $logger = null,
-    ?string $lockPath = null
+    ?string $lockPath = null,
+    ?ClockInterface $clock = null,
+    ?string $signingKey = null,
+    ?LockProviderInterface $lockProvider = null,
+    float $lockTimeout = 30.0
 )
 ```
 
 **Parameters:**
-- `$tiers` (array): Array of StorageInterface instances, ordered from fastest to slowest
-- `$serializer` (SerializerInterface|null): Serializer instance (default: NativeSerializer)
-- `$compressor` (CompressorInterface|null): Compressor instance (default: NullCompressor)
-- `$defaultTtl` (int): Default TTL in seconds (default: 3600)
-- `$logger` (LoggerInterface|null): PSR-3 logger instance
-- `$lockPath` (string|null): Directory for lock files (default: sys_get_temp_dir()/ec-locks)
+- `$tiers` (StorageInterface[]): Storages ordered from fastest to slowest
+- `$serializer`: Serializer (default: `NativeSerializer`)
+- `$compressor`: Compressor (default: `NullCompressor`)
+- `$defaultTtl` (int): TTL used when none is given, in seconds. `0` = never expire (default: 3600)
+- `$logger`: PSR-3 logger. It is also handed to every tier that implements `LoggerAwareInterface` and has no logger yet
+- `$lockPath` (string|null): Directory for file locks (default: a private per-user directory in the system temp dir). Ignored when `$lockProvider` is given
+- `$clock` (Psr\Clock\ClockInterface|null): Time source (default: `SystemClock`)
+- `$signingKey` (string|null): Secret of at least 16 bytes. When set, entries are signed with HMAC-SHA256 and unsigned or tampered entries are rejected before they are deserialized
+- `$lockProvider` (LockProviderInterface|null): Lock implementation (default: `FileLockProvider`)
+- `$lockTimeout` (float): Seconds to wait for a lock on a cache miss before computing without it (default: 30)
 
 **Throws:**
-- `\InvalidArgumentException` if `$tiers` is empty
+- `\InvalidArgumentException` if `$tiers` is empty or contains something that is not a `StorageInterface`, if the signing key is shorter than 16 bytes, or if a serializer/compressor name is empty or longer than 255 bytes
+
+The constructor does not touch the filesystem: the lock directory is created on first use.
 
 **Example:**
 ```php
 $cache = new MultiTierCache(
-    [new ApcuStorage(), new FileStorage('/cache')],
-    new NativeSerializer(),
+    [new ApcuStorage('app:', maxTtl: 60), new FileStorage('/var/cache/app')],
+    new NativeSerializer(allowedClasses: [UserDto::class]),
     new GzipCompressor(5),
-    3600,
-    $logger,
-    '/var/lock/cache'
+    defaultTtl: 3600,
+    logger: $logger,
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],
 );
 ```
 
@@ -64,15 +79,17 @@ public function get(string $key, mixed $default = null): mixed
 ```
 
 **Parameters:**
-- `$key` (string): Cache key (max 64 chars, alphanumeric + `_` `.`)
-- `$default` (mixed): Default value if key doesn't exist
+- `$key` (string): Cache key (see [KeyValidator](#keyvalidator))
+- `$default` (mixed): Value returned on a miss
 
-**Returns:** Cached value or `$default`
+**Returns:** The cached value (which may be `null` or `false`) or `$default`
 
-**Throws:**
-- `InvalidArgument` if key is invalid
+**Throws:** `InvalidArgument` if the key is invalid
 
-**Example:**
+Tiers are read in order. An expired copy in a fast tier does not stop the
+search: a slower tier may hold a fresher copy (written by another server),
+which is then copied to the faster tiers (backfill).
+
 ```php
 $value = $cache->get('user_123', ['name' => 'Unknown']);
 ```
@@ -81,7 +98,7 @@ $value = $cache->get('user_123', ['name' => 'Unknown']);
 
 ### set()
 
-Store an item in the cache.
+Store an item in all tiers.
 
 ```php
 public function set(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
@@ -89,108 +106,66 @@ public function set(string $key, mixed $value, null|int|DateInterval $ttl = null
 
 **Parameters:**
 - `$key` (string): Cache key
-- `$value` (mixed): Value to cache (any serializable type)
-- `$ttl` (int|DateInterval|null): Time to live. null = use default, 0 = forever
+- `$value` (mixed): Any value the serializer supports
+- `$ttl`: `null` = default TTL; a positive int or `DateInterval` = lifetime; `0` or a negative value **deletes** the item (PSR-16)
 
-**Returns:** `true` on success, `false` on failure
+**Returns:** `true` if every tier stored the item
 
-**Throws:**
-- `InvalidArgument` if key is invalid
+**Throws:** `InvalidArgument` if the key is invalid
 
-**Example:**
 ```php
 $cache->set('user_123', $user, 3600);
 $cache->set('config', $config, new DateInterval('P1D'));
-$cache->set('permanent', $data, 0);
 ```
 
 ---
 
 ### delete()
 
-Remove an item from the cache.
-
 ```php
 public function delete(string $key): bool
 ```
 
-**Parameters:**
-- `$key` (string): Cache key
-
-**Returns:** `true` on success
-
-**Throws:**
-- `InvalidArgument` if key is invalid
-
-**Example:**
-```php
-$cache->delete('user_123');
-```
+**Returns:** `true` when the item is gone from every tier, also when it did not exist; `false` only on errors
 
 ---
 
 ### clear()
 
-Clear all items from the cache.
-
 ```php
 public function clear(): bool
 ```
 
-**Returns:** `true` on success
-
-**Example:**
-```php
-$cache->clear();
-```
+Clears every tier. Each storage only removes its own entries (prefix /
+naming scheme), never unrelated data.
 
 ---
 
 ### has()
 
-Check if an item exists in the cache.
-
 ```php
 public function has(string $key): bool
 ```
 
-**Parameters:**
-- `$key` (string): Cache key
-
-**Returns:** `true` if exists and not expired
-
-**Throws:**
-- `InvalidArgument` if key is invalid
-
-**Example:**
-```php
-if ($cache->has('user_123')) {
-    echo "User is cached";
-}
-```
+**Returns:** `true` if a fresh entry exists (also when the cached value is `null`). The value is not deserialized.
 
 ---
 
 ### getMultiple()
 
-Retrieve multiple items from the cache.
-
 ```php
-public function getMultiple(iterable $keys, mixed $default = null): iterable
+public function getMultiple(iterable $keys, mixed $default = null): array
 ```
 
-**Parameters:**
-- `$keys` (iterable): List of cache keys
-- `$default` (mixed): Default value for missing keys
+**Returns:** Array of key => value, in the order of `$keys`
 
-**Returns:** Associative array of key => value
+**Throws:** `InvalidArgument` if any key is invalid or not a string
 
-**Throws:**
-- `InvalidArgument` if keys is not iterable
+Storages implementing `BatchStorageInterface` are read in one round trip per
+tier, and lower tiers are only asked for keys that are still missing.
 
-**Example:**
 ```php
-$results = $cache->getMultiple(['key1', 'key2', 'key3'], null);
+$cache->getMultiple(['key1', 'key2', 'key3'], null);
 // ['key1' => 'value1', 'key2' => 'value2', 'key3' => null]
 ```
 
@@ -198,57 +173,25 @@ $results = $cache->getMultiple(['key1', 'key2', 'key3'], null);
 
 ### setMultiple()
 
-Store multiple items in the cache.
-
 ```php
 public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
 ```
 
-**Parameters:**
-- `$values` (iterable): Associative array of key => value
-- `$ttl` (int|DateInterval|null): Time to live
-
-**Returns:** `true` if all succeed
-
-**Throws:**
-- `InvalidArgument` if values is not iterable
-
-**Example:**
-```php
-$cache->setMultiple([
-    'key1' => 'value1',
-    'key2' => 'value2',
-], 3600);
-```
+All keys are validated before anything is written. A TTL `<= 0` deletes the keys.
 
 ---
 
 ### deleteMultiple()
 
-Remove multiple items from the cache.
-
 ```php
 public function deleteMultiple(iterable $keys): bool
-```
-
-**Parameters:**
-- `$keys` (iterable): List of cache keys
-
-**Returns:** `true` if all succeed
-
-**Throws:**
-- `InvalidArgument` if keys is not iterable
-
-**Example:**
-```php
-$cache->deleteMultiple(['key1', 'key2', 'key3']);
 ```
 
 ---
 
 ### getOrSetSWR()
 
-Get or set with Stale-While-Revalidate support.
+Get a value or compute it, with stale-while-revalidate, stale-if-error and stampede protection.
 
 ```php
 public function getOrSetSWR(
@@ -262,57 +205,117 @@ public function getOrSetSWR(
 ```
 
 **Parameters:**
-- `$key` (string): Cache key
-- `$producer` (callable): Function to produce fresh value: `function(): mixed`
-- `$ttl` (int|DateInterval|null): Fresh data TTL
-- `$swrSeconds` (int): Stale-while-revalidate window in seconds
-- `$staleIfErrorSeconds` (int): Stale-if-error window in seconds
-- `$options` (array): Options array
-  - `mode` (string): 'sync' or 'defer' (default: 'sync')
+- `$producer` (callable): `function(): mixed`, computes a fresh value
+- `$ttl`: Fresh lifetime. `null` = default TTL (`0` = never expire). A value `<= 0` computes the value **without caching** it
+- `$swrSeconds` (int): How long after expiry the stale value may be served while it is refreshed
+- `$staleIfErrorSeconds` (int): How long after expiry the stale value may be served if the producer fails
+- `$options['mode']`: `'sync'` (default) or `'defer'`
 
-**Returns:** Cached or fresh value
+**Returns:** The cached or computed value
 
 **Throws:**
-- `InvalidArgument` if key is invalid
-- Re-throws exceptions from `$producer` on cache miss
+- `InvalidArgument` if the key or mode is invalid
+- Exceptions from `$producer` when there is no usable stale value
 
-**Example:**
+**Behaviour:**
+
+| State of the entry | What happens |
+|---|---|
+| Fresh | Returned immediately |
+| Expired, within `swrSeconds` | One process refreshes the entry; processes that cannot get the lock get the stale value without waiting. In `sync` mode the refreshing process returns the new value; in `defer` mode the stale value is returned and the refresh runs after the response is sent (PHP-FPM/LiteSpeed, otherwise `sync`). If the refresh fails, the stale value is returned |
+| Expired, only within `staleIfErrorSeconds` | Recomputed. If the producer throws, the stale value is returned instead |
+| Missing (or too old) | Computed under a per-key lock (waiting at most `lockTimeout`). After getting the lock the cache is checked again, so concurrent misses run the producer once |
+
+`null` results are cached like any other value.
+
 ```php
 $data = $cache->getOrSetSWR(
     'expensive_data',
-    fn() => computeExpensiveData(),
-    300,     // Fresh for 5 minutes
-    60,      // Serve stale for 1 minute
-    600,     // Serve stale for 10 minutes if error
-    ['mode' => 'defer']
+    fn () => computeExpensiveData(),
+    ttl: 300,
+    swrSeconds: 60,
+    staleIfErrorSeconds: 600,
+    options: ['mode' => 'defer'],
 );
 ```
 
-**Behavior:**
-1. **Cache hit (fresh):** Returns cached value immediately
-2. **Cache hit (stale, within SWR):** Returns stale value, triggers background refresh
-3. **Cache miss:** Acquires lock, calls producer, caches result
-4. **Producer error with stale data:** Returns stale if within staleIfError window
+---
+
+### remember()
+
+```php
+public function remember(string $key, null|int|DateInterval $ttl, callable $producer): mixed
+```
+
+Shortcut for `getOrSetSWR($key, $producer, $ttl)` (no stale serving, stampede protection included).
+
+---
+
+### forever()
+
+```php
+public function forever(string $key, mixed $value): bool
+```
+
+Stores a value without expiry.
+
+---
+
+### tags() / invalidateTags()
+
+```php
+public function tags(string|array $tags): TaggedCache
+public function invalidateTags(string|array $tags): bool
+```
+
+`tags()` returns a [TaggedCache](#taggedcache) view. `invalidateTags()` makes
+every entry written with any of the tags unreachable. Invalidated entries are
+not deleted; they expire through their TTL or `prune()`.
+
+```php
+$cache->tags(['users', 'team-7'])->set('user-42', $user, 3600);
+$cache->invalidateTags('team-7');
+```
 
 ---
 
 ### prune()
 
-Remove expired items from storage backends.
-
 ```php
 public function prune(): int
 ```
 
-**Returns:** Number of items pruned
+**Returns:** Number of removed entries. `FileStorage` and `PdoStorage` delete
+expired entries (FileStorage also removes files in an unknown format and
+orphaned temp files); APCu and Redis expire entries on their own.
 
-**Note:** Only works with backends that support pruning (PdoStorage). File/APCu/Redis handle expiration automatically.
+---
 
-**Example:**
+### getStats() / resetStats()
+
 ```php
-$pruned = $cache->prune();
-echo "Removed {$pruned} expired items";
+public function getStats(): array
+public function resetStats(): void
 ```
+
+Counters of this instance:
+
+```php
+[
+    'hits' => 120, 'misses' => 8, 'stale_hits' => 3, 'stale_if_error' => 1,
+    'writes' => 10, 'deletes' => 2, 'errors' => 0, 'hit_ratio' => 0.9426,
+]
+```
+
+---
+
+## TaggedCache
+
+A PSR-16 view returned by `MultiTierCache::tags()`. It supports `get`, `set`,
+`delete`, `has`, `getMultiple`, `setMultiple`, `deleteMultiple`,
+`getOrSetSWR`, `remember` and `forever`. `clear()` invalidates the view's tags.
+Entries must be read with the same set of tags they were written with (the
+order does not matter). Keys may be up to 217 bytes.
 
 ---
 
@@ -320,183 +323,184 @@ echo "Removed {$pruned} expired items";
 
 ### StorageInterface
 
-All storage backends must implement this interface.
-
 ```php
 interface StorageInterface
 {
-    public function get(string $key): ?string;
-    public function set(string $key, string $payload, int $ttl): bool;
-    public function delete(string $key): bool;
+    public function get(string $key): ?string;          // null when missing or expired
+    public function set(string $key, string $payload, int $ttl): bool; // $ttl 0 = no expiry
+    public function delete(string $key): bool;          // true also when the key did not exist
     public function has(string $key): bool;
-    public function clear(): bool;
-    public function prune(): int;
+    public function clear(): bool;                      // only this storage's entries
+    public function prune(): int;                       // number of removed entries
 }
 ```
+
+### BatchStorageInterface
+
+Optional, implemented by all built-in storages:
+
+```php
+interface BatchStorageInterface extends StorageInterface
+{
+    public function getMany(array $keys): array;              // found payloads indexed by key
+    public function setMany(array $payloads, int $ttl): bool;
+    public function deleteMany(array $keys): bool;
+}
+```
+
+All built-in storages implement `Psr\Log\LoggerAwareInterface` and report
+errors through PSR-3 instead of `error_log()`.
 
 ---
 
 ### FileStorage
 
-File-based cache storage with directory sharding.
-
-#### Constructor
-
 ```php
 public function __construct(
     string $path,
     string $ext = '.cache',
-    int $shards = 2
+    int $shards = 2,
+    int $fileMode = 0640,
+    int $dirMode = 0770,
+    ?ClockInterface $clock = null,
+    ?LoggerInterface $logger = null
 )
 ```
 
 **Parameters:**
-- `$path` (string): Cache directory path
-- `$ext` (string): File extension (default: '.cache')
-- `$shards` (int): Sharding level 0-3 (default: 2)
+- `$path`: Cache directory (created if missing). Must not be empty or `/`
+- `$ext`: File extension, letters/digits/`.`/`_`/`-` only
+- `$shards`: Sub-directory levels 0-3
+- `$fileMode` / `$dirMode`: Exact permissions (umask is not applied)
 
-**Throws:**
-- `\RuntimeException` if directory cannot be created or is not writable
-
-**Example:**
-```php
-$storage = new FileStorage('/var/cache/app', '.cache', 2);
-```
-
-#### Methods
-
-All methods from `StorageInterface`.
+**Throws:** `\InvalidArgumentException` for an invalid path or extension; `\RuntimeException` if the directory cannot be created or is not writable
 
 **Notes:**
-- Uses atomic writes (temp file + rename)
-- Uses flock() for read locking
-- Supports 0-3 levels of directory sharding
-- `prune()` returns 0 (expiration handled by MultiTierCache)
+- File names are the xxh128 hash of the key; layout `path/a1/b2/<hash>.cache` with 2 shards
+- Each file starts with `ECF1` + the expiry timestamp: `get()` ignores (and removes) expired files, `prune()` deletes them
+- Atomic writes: exclusive temp file (`fopen('x')`, never follows symlinks) + `rename()`
+- Directories are created on write only
+- `clear()` only deletes files that match the storage's naming scheme inside shard directories and never follows symlinks
 
 ---
 
 ### ApcuStorage
 
-APCu memory cache storage.
-
-#### Constructor
-
 ```php
-public function __construct(string $prefix = 'ec:')
+public function __construct(string $prefix = 'ec:', int $maxTtl = 0, ?LoggerInterface $logger = null)
+public static function isAvailable(): bool
 ```
 
-**Parameters:**
-- `$prefix` (string): Key prefix for namespacing (default: 'ec:')
+- `$prefix`: Required, non-empty (`clear()` deletes every key with it)
+- `$maxTtl`: Cap for the TTL of entries in this tier (0 = no cap). APCu is local to one server; a short cap lets other servers' updates become visible quickly
 
-**Throws:**
-- `\RuntimeException` if APCu extension is not available or not enabled
-
-**Example:**
-```php
-$storage = new ApcuStorage('myapp:');
-```
-
-#### Methods
-
-All methods from `StorageInterface`.
-
-**Notes:**
-- `clear()` only removes keys with the configured prefix
-- Extremely fast (in-memory)
-- Shared between PHP-FPM workers
-- `prune()` returns 0 (APCu handles expiration)
+**Throws:** `\RuntimeException` if APCu is missing or disabled (`apc.enable_cli=1` is needed in CLI); `\InvalidArgumentException` for an empty prefix
 
 ---
 
 ### RedisStorage
 
-Redis cache storage supporting phpredis and predis.
-
-#### Constructor
-
 ```php
-public function __construct($redisClient, string $prefix = 'ec:')
+public function __construct(object $redisClient, string $prefix = 'ec:', ?LoggerInterface $logger = null)
 ```
 
-**Parameters:**
-- `$redisClient` (Redis|Predis\ClientInterface): Redis client instance
-- `$prefix` (string): Key prefix (default: 'ec:')
+- `$redisClient`: `\Redis` (phpredis) or `\Predis\ClientInterface`
+- `$prefix`: Required, non-empty
 
-**Throws:**
-- `\InvalidArgumentException` if client is invalid type
-
-**Example:**
-```php
-// phpredis
-$redis = new Redis();
-$redis->connect('127.0.0.1', 6379);
-$storage = new RedisStorage($redis, 'app:');
-
-// predis
-$redis = new Predis\Client('tcp://127.0.0.1:6379');
-$storage = new RedisStorage($redis, 'app:');
-```
-
-#### Methods
-
-All methods from `StorageInterface`.
+**Throws:** `\InvalidArgumentException` for an unsupported client or an empty prefix
 
 **Notes:**
-- Uses SETEX for TTL support
-- `clear()` uses SCAN to remove only prefixed keys
-- `prune()` returns 0 (Redis handles expiration)
+- `SETEX` for TTLs, `MGET` for batch reads, pipelines for batch writes
+- `clear()` uses non-blocking `SCAN` with the escaped prefix (also for Predis) and handles client-level prefixes (`Redis::OPT_PREFIX`, Predis `prefix` option)
+- `prune()` returns 0 (Redis expires keys itself)
 
 ---
 
 ### PdoStorage
 
-PDO database cache storage.
-
-#### Constructor
-
 ```php
-public function __construct(PDO $pdo, string $table = 'easycache')
-```
-
-**Parameters:**
-- `$pdo` (PDO): PDO instance
-- `$table` (string): Table name (default: 'easycache')
-
-**Example:**
-```php
-$pdo = new PDO('mysql:host=localhost;dbname=cache', 'user', 'pass');
-$storage = new PdoStorage($pdo, 'cache_items');
-```
-
-#### ensureTable()
-
-Create the cache table if it doesn't exist.
-
-```php
+public function __construct(
+    PDO $pdo,
+    string $table = 'easycache',
+    ?ClockInterface $clock = null,
+    ?LoggerInterface $logger = null
+)
 public function ensureTable(): void
+public function upgradeSchema(): void
 ```
 
-**Throws:**
-- `\RuntimeException` if table creation fails
+- `$table`: `[A-Za-z_][A-Za-z0-9_]*`, optionally `schema.table`; anything else throws `\InvalidArgumentException`
+- The connection's attributes (error mode...) are not changed; exception and silent error modes both work
+- Payloads are bound as binary (`PDO::PARAM_LOB`)
+- Keys longer than 64 bytes are stored as `':' . sha256` so they fit the key column
+- `ensureTable()` creates the table if needed:
 
-**Example:**
+| Driver | Key | Payload | Expiry |
+|---|---|---|---|
+| SQLite | `TEXT` | `BLOB` | `INTEGER` |
+| MySQL/MariaDB | `VARBINARY(64)` (case-sensitive) | `LONGBLOB` | `BIGINT` |
+| PostgreSQL | `VARCHAR(64)` | `BYTEA` | `BIGINT` |
+
+- `upgradeSchema()` migrates MySQL tables created by EasyCache < 3.1 (`BLOB`, case-insensitive key)
+- `prune()` deletes expired rows and returns their number
+
+---
+
+## Locks
+
+### LockInterface / LockProviderInterface
+
 ```php
-$storage->ensureTable();
+interface LockInterface
+{
+    public function acquire(bool $blocking = true, ?float $timeout = null): bool;
+    public function release(): void;
+}
+
+interface LockProviderInterface
+{
+    public function create(string $key): LockInterface;
+}
 ```
 
-**Table Schema:**
-- `k` (VARCHAR(64) PRIMARY KEY): Cache key
-- `payload` (BLOB): Serialized and compressed data
-- `expires_at` (BIGINT): Expiration timestamp
+### FileLockProvider
 
-#### Methods
+```php
+public function __construct(?string $directory = null, int $mode = 0770)
+```
 
-All methods from `StorageInterface`.
+`flock()` based locks (one machine). Without a directory, a per-user
+directory in the system temp dir is used: it is created with mode `0700` and
+only used when it is owned by the current user and not writable by others.
+If the directory is unusable, locks cannot be acquired and values are
+computed (and still cached) without locking.
 
-**Notes:**
-- `prune()` deletes expired rows and returns count
-- Supports MySQL, PostgreSQL, SQLite
-- Uses UPSERT for atomic set operations
+### RedisLockProvider
+
+```php
+public function __construct(object $redis, string $prefix = 'ec:lock:', int $ttlMs = 30000)
+```
+
+Distributed locks (`SET key token NX PX ttl`, released with a compare-and-delete
+Lua script) for several servers. The TTL protects against crashed holders;
+a blocking `acquire()` waits at most the TTL.
+
+### NullLockProvider
+
+Disables locking (every lock is acquired immediately).
+
+### Util\Lock
+
+```php
+public function __construct(string $path, bool $removeOnRelease = true)
+public function acquire(bool $blocking = true, ?float $timeout = null): bool
+public function release(): void
+public function isAcquired(): bool
+```
+
+The file lock used by `FileLockProvider`. It refuses symlinked lock files,
+supports a timeout and removes the lock file on release (race free: after
+locking it checks that the locked file is still the one at the path).
 
 ---
 
@@ -508,44 +512,35 @@ All methods from `StorageInterface`.
 interface SerializerInterface
 {
     public function serialize(mixed $value): string;
-    public function deserialize(string $payload): mixed;
-    public function name(): string;
+    public function deserialize(string $payload): mixed; // must throw on invalid input
+    public function name(): string;                      // 1-255 bytes, stored with each entry
 }
 ```
 
----
-
 ### NativeSerializer
 
-PHP native serialization.
-
 ```php
-$serializer = new NativeSerializer();
+public function __construct(bool|array $allowedClasses = true, int $maxDepth = 0)
 ```
 
-**Features:**
-- Supports objects and complex types
-- Name: 'php'
-- Uses `serialize()` and `unserialize()`
+- `$allowedClasses`: `true` (any class), `false` (no objects) or a list of class names. Other classes become `__PHP_Incomplete_Class`
+- `$maxDepth`: Maximum nesting depth (0 = PHP default)
+- Throws `\UnexpectedValueException` for invalid payloads (a stored `false` is still returned as `false`)
+- Name: `php`
 
----
+> Unserializing attacker-controlled data can execute code. Restrict
+> `$allowedClasses` and/or use a signing key.
 
 ### JsonSerializer
 
-JSON serialization.
-
 ```php
-$serializer = new JsonSerializer();
+public function __construct(int $depth = 512)
 ```
 
-**Features:**
-- Portable across languages
-- Name: 'json'
-- Uses `JSON_THROW_ON_ERROR` flag
-- Preserves Unicode characters
-
-**Throws:**
-- `\JsonException` on invalid data
+- Never creates objects: objects come back as associative arrays
+- Floats keep their type (`1.0` stays a float)
+- Throws `\JsonException` on invalid data
+- Name: `json`
 
 ---
 
@@ -558,75 +553,49 @@ interface CompressorInterface
 {
     public function compress(string $data): string;
     public function decompress(string $data): string;
-    public function name(): string;
+    public function name(): string; // stored with each entry; "none" = not compressed
 }
 ```
 
----
+The compressor name is stored with every entry. Entries compressed with
+`gzip` or `zstd` stay readable after switching to another compressor;
+entries written with a custom compressor need that compressor to be read
+(otherwise they are misses).
 
 ### NullCompressor
 
-No compression.
-
-```php
-$compressor = new NullCompressor();
-```
-
-**Features:**
-- Pass-through (no compression)
-- Name: 'none'
-
----
+No compression. Name: `none`.
 
 ### GzipCompressor
 
-Gzip compression.
-
 ```php
-public function __construct(int $level = 3)
+public function __construct(int $level = 3, int $maxDecompressedSize = 64 * 1024 * 1024)
 ```
 
-**Parameters:**
-- `$level` (int): Compression level 0-9 (default: 3)
-
-**Example:**
-```php
-$compressor = new GzipCompressor(5);
-```
-
-**Features:**
-- Name: 'gzip'
-- Requires ext-zlib
-- Level 0 = no compression, 9 = maximum
-
-**Throws:**
-- `\RuntimeException` if zlib not available or compression fails
-
----
+- `$level`: 0-9 (clamped)
+- `$maxDecompressedSize`: Refuse to inflate more than this many bytes (0 = unlimited)
+- Requires ext-zlib. Name: `gzip`
 
 ### ZstdCompressor
 
-Zstandard compression.
-
 ```php
-public function __construct(int $level = 3)
+public function __construct(int $level = 3, int $maxDecompressedSize = 64 * 1024 * 1024)
 ```
 
-**Parameters:**
-- `$level` (int): Compression level (default: 3)
+- `$level`: 1-22 (clamped)
+- Requires ext-zstd. Name: `zstd`
 
-**Example:**
-```php
-$compressor = new ZstdCompressor(3);
-```
+---
 
-**Features:**
-- Name: 'zstd'
-- Requires ext-zstd
-- Faster than Gzip
+## Clocks
 
-**Throws:**
-- `\RuntimeException` if zstd not available or compression fails
+Both implement `Psr\Clock\ClockInterface`.
+
+- `SystemClock`: the system time (default)
+- `FrozenClock`: for tests: `new FrozenClock()`, `FrozenClock::at($timestamp)`, `->advance(int $seconds)`, `->set(DateTimeImmutable $now)`
+
+Pass the same clock to `MultiTierCache` and to `FileStorage`/`PdoStorage`
+to control expiry in tests without `sleep()`.
 
 ---
 
@@ -634,87 +603,22 @@ $compressor = new ZstdCompressor(3);
 
 ### KeyValidator
 
-Validates cache keys according to PSR-16.
-
-#### assert()
-
 ```php
 public static function assert(string $key): void
+public static function normalize(mixed $key): string // for keys from iterables; ints are accepted
 ```
-
-**Parameters:**
-- `$key` (string): Key to validate
-
-**Throws:**
-- `InvalidArgument` if key is invalid
 
 **Rules:**
-- Max 64 characters
-- Only: `A-Za-z0-9_.`
-- No: `{}()/\@:`
-
-**Example:**
-```php
-KeyValidator::assert('user_123');     // OK
-KeyValidator::assert('user:123');     // Throws
-KeyValidator::assert('user/profile'); // Throws
-```
-
----
-
-### Lock
-
-File-based locking mechanism.
-
-#### Constructor
+- 1 to 255 bytes (`KeyValidator::MAX_LENGTH`)
+- Printable ASCII only (`!` to `~`): no whitespace, no control characters, no non-ASCII bytes
+- None of the reserved characters `{}()/\@:` (`KeyValidator::RESERVED_CHARACTERS`)
 
 ```php
-public function __construct(string $path)
+KeyValidator::assert('user_123');          // OK
+KeyValidator::assert('user-3f2a-77b2');    // OK
+KeyValidator::assert('user:123');          // throws
+KeyValidator::assert("user\n");            // throws
 ```
-
-**Parameters:**
-- `$path` (string): Lock file path
-
----
-
-#### acquire()
-
-```php
-public function acquire(bool $blocking = true): bool
-```
-
-**Parameters:**
-- `$blocking` (bool): Wait for lock (true) or fail immediately (false)
-
-**Returns:** `true` if lock acquired
-
-**Example:**
-```php
-$lock = new Lock('/tmp/my.lock');
-
-// Blocking
-if ($lock->acquire(true)) {
-    // Do work
-    $lock->release();
-}
-
-// Non-blocking
-if ($lock->acquire(false)) {
-    // Do work
-} else {
-    echo "Could not acquire lock";
-}
-```
-
----
-
-#### release()
-
-```php
-public function release(): void
-```
-
-**Note:** Automatically called in destructor.
 
 ---
 
@@ -722,103 +626,85 @@ public function release(): void
 
 ### InvalidArgument
 
-Thrown for invalid cache keys or arguments.
-
 ```php
-class InvalidArgument extends \InvalidArgumentException 
+final class InvalidArgument extends \InvalidArgumentException
     implements Psr\SimpleCache\InvalidArgumentException
 ```
 
-**Example:**
-```php
-try {
-    $cache->set('invalid:key', 'value');
-} catch (InvalidArgument $e) {
-    echo "Invalid key: " . $e->getMessage();
-}
-```
+Thrown for invalid keys, tags and SWR modes.
 
 ---
 
 ## Laravel Integration
 
-### Facade
+### Container and facade
 
 ```php
-use EasyCache;
-
-EasyCache::set('key', 'value', 3600);
-$value = EasyCache::get('key');
+app('easycache');                                    // MultiTierCache singleton
+app(\Iprodev\EasyCache\Cache\MultiTierCache::class); // same instance
+EasyCache::remember('stats', 300, fn () => $this->computeStats());
 ```
 
-All methods from `MultiTierCache` are available.
+The facade exposes every public `MultiTierCache` method.
+
+### Artisan commands
+
+```bash
+php artisan easycache:prune   # delete expired entries
+php artisan easycache:clear   # delete every entry
+```
 
 ### Configuration
 
-Published to `config/easycache.php`:
+`php artisan vendor:publish --tag=easycache-config` publishes
+`config/easycache.php`. Main options (all configurable through `EASYCACHE_*`
+environment variables, see the README):
 
 ```php
 return [
-    'drivers' => ['apcu', 'redis', 'file'],
+    'drivers' => ['file'],              // apcu, redis, file, pdo (fastest first)
+    'skip_unavailable_drivers' => true, // log and skip drivers that fail to initialise
     'default_ttl' => 600,
-    'lock_path' => storage_path('framework/cache/easycache-locks'),
-    
-    'serializer' => [
-        'driver' => 'php', // php|json
-    ],
-    
-    'compressor' => [
-        'driver' => 'gzip', // none|gzip|zstd
-        'level' => 3,
-    ],
-    
-    // ... backend-specific options
+    'sign' => true,                     // sign entries...
+    'signing_key' => null,              // ...with this key, or one derived from APP_KEY
+    'lock' => ['driver' => 'file', 'path' => storage_path('framework/cache/easycache-locks'), 'timeout' => 30],
+    'apcu' => ['prefix' => 'ec:', 'max_ttl' => 60],
+    'redis' => ['client' => 'phpredis', 'host' => '127.0.0.1', 'port' => 6379, 'prefix' => 'ec:'],
+    'file' => ['path' => storage_path('framework/cache/easycache'), 'ext' => '.cache', 'shards' => 2],
+    'pdo' => ['dsn' => '', 'table' => 'easycache', 'auto_create' => true], // '' = SQLite in storage/
+    'serializer' => ['driver' => 'php', 'allowed_classes' => true],
+    'compressor' => ['driver' => 'none', 'level' => 3],
 ];
 ```
 
-### Service Provider
-
-Auto-discovered. Registers:
-- `EasyCache` facade
-- `easycache` singleton in container
-
 ---
 
-## Type Reference
+## Entry Format
 
-### Common Types
-
-```php
-// TTL types
-int           // seconds
-DateInterval  // e.g., new DateInterval('PT1H')
-null          // use default TTL
-
-// Supported value types
-string
-int
-float
-bool
-null
-array
-object (with NativeSerializer)
 ```
+"EC03" | flags (1 byte, bit 0 = signed) | expires (uint64 BE, 0 = never)
+| swr (uint32 BE) | sei (uint32 BE)
+| serializer name length (1) + name | compressor name length (1) + name
+| [HMAC-SHA256 of header + body (32 bytes), if signed]
+| body = compress(serialize(value))
+```
+
+The header is parsed with `unpack()`; only the body goes through the
+configured serializer, and only after the signature (if any) was verified.
+Entries in any other format are treated as misses.
 
 ---
 
 ## Error Handling
 
-All operations are wrapped in try-catch internally. Failures are logged if logger is provided and return false/null instead of throwing.
+Storage, serialization and compression failures are logged (PSR-3) and
+counted in `getStats()['errors']`; the operation then returns `false`, the
+default value or a miss instead of throwing.
 
 **Exceptions that ARE thrown:**
-- `InvalidArgument`: Invalid keys or parameters
-- `\RuntimeException`: Construction errors (missing extensions, invalid paths)
-- `\JsonException`: JSON serialization errors (JsonSerializer)
-
-**Exceptions that are NOT thrown (logged instead):**
-- Storage failures (read/write errors)
-- Compression/decompression errors
-- Lock acquisition failures
+- `InvalidArgument`: invalid keys, tags or options
+- `\InvalidArgumentException` / `\RuntimeException`: construction errors (missing extensions, invalid paths, short signing key...)
+- Exceptions from your producer in `getOrSetSWR()`/`remember()` when no stale value can be served
 
 ---
 

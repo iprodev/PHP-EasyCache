@@ -3,15 +3,17 @@
 **EasyCache** یک کتابخانه cache حرفه‌ای و کامل است که استاندارد **PSR-16** را پیاده‌سازی می‌کند و قابلیت‌های پیشرفته زیر را دارد:
 
 - 🚀 ذخیره‌سازی چند لایه: **APCu، Redis، File و PDO (MySQL/PostgreSQL/SQLite)**
-- 🔒 **نوشتن اتمی** و **قفل خواندن** برای file storage
-- ⚡ **SWR کامل** (*stale-while-revalidate* + *stale-if-error*) با قفل‌های غیربلاکه
-- 🔧 **Serializer و Compressor قابل تعویض** (PHP/JSON + هیچ/Gzip/Zstd)
+- 🔒 **نوشتن اتمی** برای file storage و **جلوگیری از cache stampede** با قفل مخصوص هر کلید (فایلی یا Redis)
+- ⚡ **SWR کامل** (*stale-while-revalidate* + *stale-if-error*)
+- 🛡️ **رکوردهای ضد دستکاری**: امضای اختیاری HMAC-SHA256 و عدم استفاده از `unserialize()` برای هدر رکوردها
+- 🔧 **Serializer و Compressor قابل تعویض** (PHP/JSON + هیچ/Gzip/Zstd یا پیاده‌سازی خودتان)
 - 🔄 **Backfill خودکار** بین لایه‌ها
-- 🎯 یکپارچه‌سازی کامل با **Laravel**
-- ✅ **پوشش تست جامع** با PHPUnit
-- 🛡️ **مدیریت خطای بهبود یافته** با پشتیبانی logging
+- 📦 **عملیات دسته‌ای** (`MGET`، `IN (...)`، `apcu_fetch([...])`)، **tag**، `remember()`، `forever()` و آمار
+- 🎯 یکپارچه‌سازی کامل با **Laravel**: Service Provider، Facade و دستورات artisan
+- ✅ تست‌شده روی File، SQLite، MySQL، PostgreSQL، Redis (phpredis و Predis) و APCu
 
-> نسخه: **v3.0.1** — نیازمند **PHP 8.1+** و `psr/simple-cache:^3`
+> نسخه: **v3.1.0** — نیازمند **PHP 8.1+** و `psr/simple-cache` نسخهٔ `^2 || ^3`
+> از 3.0 ارتقا می‌دهید؟ [MIGRATION.md](MIGRATION.md) را بخوانید.
 
 ---
 
@@ -47,13 +49,14 @@ $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
 $redisStore = new RedisStorage($redis, 'ec:');
 
-$file  = new FileStorage(__DIR__.'/cache');
+$file  = new FileStorage('/var/cache/myapp');
 
 $cache = new MultiTierCache(
     [$apcu, $redisStore, $file],
     new NativeSerializer(),
     new GzipCompressor(3),
-    defaultTtl: 600
+    defaultTtl: 600,
+    signingKey: getenv('EASYCACHE_SIGNING_KEY') ?: null, // کلید مخفی حداقل ۱۶ بایتی (توصیه می‌شود)
 );
 
 // API استاندارد PSR-16
@@ -82,9 +85,13 @@ $cache = new MultiTierCache(
 );
 ```
 
+اگر نسخهٔ منقضی‌شده‌ای در لایهٔ سریع باشد و لایهٔ کندتر نسخهٔ تازه‌تری داشته باشد، نسخهٔ تازه برگردانده و در لایه‌های سریع‌تر نوشته می‌شود.
+
+> ⚠️ **چند سرور دارید؟** APCu بین سرورها مشترک نیست: `set()` یا `delete()` روی سرور A روی APCu سرور B اثری ندارد. TTL لایهٔ محلی را محدود کنید (`new ApcuStorage('app:', maxTtl: 60)`) و برای جلوگیری از stampede بین سرورها از `RedisLockProvider` استفاده کنید.
+
 ### 2. Stale-While-Revalidate (SWR)
 
-وقتی داده منقضی می‌شود، **داده قدیمی فوراً برگردانده** و **به‌روزرسانی در پس‌زمینه** انجام می‌شود:
+وقتی داده منقضی می‌شود ولی هنوز داخل پنجرهٔ SWR است، **دادهٔ قدیمی سرو می‌شود** و فقط یک پروسه آن را تازه می‌کند:
 
 ```php
 $result = $cache->getOrSetSWR(
@@ -99,23 +106,64 @@ $result = $cache->getOrSetSWR(
 );
 ```
 
-### 3. Serializer و Compressor قابل تعویض
+**نحوهٔ کار:**
+1. رکورد **تازه** → فوراً برگردانده می‌شود.
+2. **منقضی، داخل `swrSeconds`** → یک پروسه رکورد را تازه می‌کند و بقیه بدون انتظار مقدار قدیمی را می‌گیرند.
+   - `mode: 'sync'` (پیش‌فرض): پروسهٔ تازه‌کننده مقدار **جدید** را برمی‌گرداند.
+   - `mode: 'defer'`: مقدار قدیمی برگردانده می‌شود و تازه‌سازی بعد از ارسال پاسخ انجام می‌شود (`fastcgi_finish_request()` یا LiteSpeed؛ در غیر این صورت مثل `sync`).
+3. **منقضی، فقط داخل `staleIfErrorSeconds`** → مقدار دوباره محاسبه می‌شود و فقط **اگر producer خطا بدهد** مقدار قدیمی برگردانده می‌شود.
+4. **ناموجود** → زیر قفل مخصوص همان کلید محاسبه می‌شود تا درخواست‌های همزمان producer را فقط یک بار اجرا کنند.
+
+TTL برابر `null` یعنی TTL پیش‌فرض (`0` = بدون انقضا) و TTL کوچک‌تر یا مساوی صفر یعنی محاسبه بدون کش. نتیجهٔ `null` هم کش می‌شود.
+
+### 3. امنیت: رکوردهای امضاشده
+
+هر کسی که بتواند در backend کش بنویسد (Redis بدون رمز، پوشهٔ کش مشترک، جدول مشترک دیتابیس و...) در غیر این صورت می‌تواند رکورد جعلی بکارد. EasyCache هیچ‌وقت هدر رکوردها را با `unserialize()` نمی‌خواند و با کلید امضا، هر رکورد امضای HMAC-SHA256 دارد: رکوردهای بدون امضا یا دستکاری‌شده **پیش از** deserialize شدن رد می‌شوند.
 
 ```php
-// Serializer نیتیو PHP (پشتیبانی از objects)
 $cache = new MultiTierCache(
-    [$storage], 
-    new NativeSerializer(),
+    [$redisStore],
+    new NativeSerializer(allowedClasses: [UserDto::class]), // یا false: هیچ شیئی ساخته نشود
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],             // حداقل ۱۶ بایت تصادفی
+);
+```
+
+### 4. متدهای کمکی
+
+```php
+// یک بار محاسبه و ۱۰ دقیقه کش
+$user = $cache->remember('user-42', 600, fn () => $repo->find(42));
+
+// بدون انقضا
+$cache->forever('feature-flags', $flags);
+
+// tag: باطل کردن گروهی رکوردها
+$cache->tags(['users'])->set('user-42', $user);
+$cache->invalidateTags('users');
+
+// شمارندهٔ hit/miss همین نمونه
+$cache->getStats(); // ['hits' => .., 'misses' => .., 'hit_ratio' => 0.93, ...]
+```
+
+### 5. Serializer و Compressor قابل تعویض
+
+```php
+// Serializer نیتیو PHP (پشتیبانی از objects؛ کلاس‌های مجاز را محدود کنید)
+$cache = new MultiTierCache(
+    [$storage],
+    new NativeSerializer(allowedClasses: true),
     new GzipCompressor(5)
 );
 
-// Serializer JSON (سریع‌تر برای داده‌های ساده)
+// Serializer JSON (هیچ‌وقت شیء نمی‌سازد؛ اشیاء به آرایه تبدیل می‌شوند)
 $cache = new MultiTierCache(
     [$storage],
     new JsonSerializer(),
     new ZstdCompressor(3)
 );
 ```
+
+نام compressor همراه هر رکورد ذخیره می‌شود، پس با تعویض compressor رکوردهای gzip/zstd قبلی همچنان قابل خواندن‌اند. از حالت فشرده خارج کردن به ۶۴ مگابایت محدود است تا در برابر decompression bomb محافظت شود.
 
 ---
 
@@ -125,8 +173,10 @@ $cache = new MultiTierCache(
 Cache حافظه‌ای فوق‌سریع
 
 ```php
-$storage = new ApcuStorage('myapp:');
+$storage = new ApcuStorage(prefix: 'myapp:', maxTtl: 60); // prefix اجباری است و نباید خالی باشد
 ```
+
+در CLI به `apc.enable_cli=1` نیاز است.
 
 ### Redis
 Cache شبکه‌ای با قابلیت اشتراک‌گذاری
@@ -134,19 +184,26 @@ Cache شبکه‌ای با قابلیت اشتراک‌گذاری
 ```php
 $redis = new Redis();
 $redis->connect('127.0.0.1', 6379);
-$storage = new RedisStorage($redis, 'myapp:');
+$storage = new RedisStorage($redis, 'myapp:'); // phpredis یا Predis؛ prefix اجباری است
 ```
+
+`clear()` فقط کلیدهای همین prefix را با `SCAN` غیرمسدودکننده حذف می‌کند.
 
 ### File
 Cache دیسکی با sharding
 
 ```php
 $storage = new FileStorage(
-    path: '/var/cache/myapp',
+    path: '/var/cache/myapp',  // بیرون از web root
     ext: '.cache',
-    shards: 2
+    shards: 2,
+    fileMode: 0640,            // مجوزها مستقل از umask
+    dirMode: 0770
 );
 ```
+
+- زمان انقضا داخل هر فایل ذخیره می‌شود؛ فایل‌های منقضی نادیده گرفته می‌شوند و `prune()` آن‌ها را حذف می‌کند (`vendor/bin/easycache-prune /var/cache/myapp` یا `php artisan easycache:prune` را زمان‌بندی کنید).
+- `clear()` فقط فایل‌های خود کش را حذف می‌کند و هرگز symlink را دنبال نمی‌کند.
 
 ### PDO
 Cache پایگاه داده (MySQL/PostgreSQL/SQLite)
@@ -155,6 +212,9 @@ Cache پایگاه داده (MySQL/PostgreSQL/SQLite)
 $pdo = new PDO('mysql:host=localhost;dbname=cache', 'user', 'pass');
 $storage = new PdoStorage($pdo, 'easycache');
 $storage->ensureTable();
+
+// جدول‌های MySQL ساخته‌شده با نسخه‌های قبل از 3.1 (محدودیت ۶۴ کیلوبایت و کلید غیرحساس به حروف)
+$storage->upgradeSchema();
 ```
 
 ---
@@ -217,6 +277,20 @@ composer require iprodev/php-easycache
 php artisan vendor:publish --tag=easycache-config
 ```
 
+پیکربندی از طریق `.env`:
+
+```env
+EASYCACHE_DRIVERS=apcu,redis,file   # پیش‌فرض: file
+EASYCACHE_DEFAULT_TTL=600
+EASYCACHE_REDIS_HOST=127.0.0.1
+EASYCACHE_LOCK_DRIVER=redis         # file|redis|none
+EASYCACHE_COMPRESSOR=gzip           # none|gzip|zstd
+```
+
+- رکوردها به‌طور پیش‌فرض با کلیدی مشتق از `APP_KEY` **امضا** می‌شوند (`EASYCACHE_SIGNING_KEY` برای کلید دلخواه، `EASYCACHE_SIGN=false` برای غیرفعال کردن).
+- درایوری که راه‌اندازی نشود (افزونهٔ ناموجود، Redis خاموش و...) با یک warning در لاگ کنار گذاشته می‌شود.
+- کش از طریق `app('easycache')`، Facade یا type-hint کردن `MultiTierCache` در دسترس است.
+
 ### استفاده
 
 ```php
@@ -232,6 +306,13 @@ $data = EasyCache::getOrSetSWR(
     fn() => $this->computeStats(),
     300, 60, 300
 );
+```
+
+### دستورات Artisan
+
+```bash
+php artisan easycache:prune   # حذف رکوردهای منقضی
+php artisan easycache:clear   # حذف همهٔ رکوردها
 ```
 
 ---
@@ -259,21 +340,23 @@ composer qa
 
 ### پوشش تست
 
-کتابخانه شامل تست‌های جامع برای:
-- ✅ همه backend های storage
-- ✅ Multi-tier caching با backfill
-- ✅ قابلیت SWR
-- ✅ Serializer ها و Compressor ها
-- ✅ اعتبارسنجی کلید
-- ✅ مکانیزم قفل
-- ✅ حالت‌های خطا و edge case ها
+- ✅ یک مجموعه تست مشترک برای همهٔ storageها که روی File، SQLite، MySQL، PostgreSQL، phpredis، Predis و APCu اجرا می‌شود
+- ✅ Multi-tier caching، backfill و رجوع به لایه‌های تازه‌تر
+- ✅ رفتار SWR و stale-if-error (با ساعت ثابت PSR-20 و بدون `sleep()`)
+- ✅ امنیت: رکوردهای امضاشده، دستکاری‌شده و بدون امضا، تلاش برای object injection
+- ✅ انطباق با PSR-16 و جلوگیری از stampede با پروسه‌های همزمان
+- ✅ Serializer، Compressor، اعتبارسنجی کلید، قفل‌های فایلی و Redis
+- ✅ Service Provider، Facade و دستورات Laravel و ابزار CLI
+
+تست‌های Redis، MySQL و PostgreSQL با متغیرهای محیطی `EASYCACHE_TEST_*` فعال می‌شوند ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ---
 
 ## 📚 مستندات
 
 ### مستندات فارسی
-- [گزارش بهبودها](IMPROVEMENTS_SUMMARY.md) - خلاصه کامل تغییرات
+- [API_FA.md](API_FA.md) - مرجع کامل API
+- [EXAMPLES_FA.md](EXAMPLES_FA.md) - مثال‌های کاربردی
 
 ### مستندات انگلیسی
 - [README.md](README.md) - راهنمای اصلی
@@ -282,23 +365,27 @@ composer qa
 - [PERFORMANCE.md](PERFORMANCE.md) - راهنمای بهینه‌سازی
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - حل مشکلات
 - [CONTRIBUTING.md](CONTRIBUTING.md) - راهنمای مشارکت
+- [MIGRATION.md](MIGRATION.md) - راهنمای ارتقا
+- [SECURITY.md](SECURITY.md) - سیاست امنیتی و توصیه‌های امن‌سازی
 
 ---
 
 ## 🔑 قوانین کلید (PSR-16)
 
-- **کاراکترهای مجاز:** `[A-Za-z0-9_.]`
-- **حداکثر طول:** 64 کاراکتر
-- **کاراکترهای ممنوع:** `{ } ( ) / \ @ :`
+- **کاراکترهای مجاز:** همهٔ کاراکترهای ASCII قابل چاپ (`!` تا `~`) به جز کاراکترهای رزروشده
+- **کاراکترهای ممنوع:** `{ } ( ) / \ @ :`، فاصله، کاراکترهای کنترلی (از جمله newline) و بایت‌های غیر ASCII
+- **حداکثر طول:** ۲۵۵ بایت
 
 ```php
 // کلیدهای معتبر
 $cache->set('user_123', $data);
 $cache->set('posts.latest', $data);
+$cache->set('user-3f2a9c1e-77b2-4f3b-9a51-1c2d3e4f5a6b', $data);
 
-// کلیدهای نامعتبر
+// کلیدهای نامعتبر (Psr\SimpleCache\InvalidArgumentException)
 $cache->set('user:123', $data);    // خطا: دارای :
 $cache->set('user/123', $data);    // خطا: دارای /
+$cache->set('user 123', $data);    // خطا: دارای فاصله
 ```
 
 ---
@@ -308,10 +395,20 @@ $cache->set('user/123', $data);    // خطا: دارای /
 ### 1. از APCu به عنوان لایه اول استفاده کنید
 ```php
 $cache = new MultiTierCache([
-    new ApcuStorage(),  // سریع‌ترین
-    new RedisStorage($redis),
-    new FileStorage('/cache')
+    new ApcuStorage('app:', maxTtl: 60),  // سریع‌ترین (TTL محدود برای چند سرور)
+    new RedisStorage($redis, 'app:'),
+    new FileStorage('/var/cache/app')
 ]);
+```
+
+### در محیط production رکوردها را امضا کنید
+```php
+$cache = new MultiTierCache($tiers, signingKey: $_ENV['EASYCACHE_SIGNING_KEY']);
+```
+
+### به‌جای حلقهٔ `get()` از عملیات دسته‌ای استفاده کنید
+```php
+$users = $cache->getMultiple(['user_1', 'user_2', 'user_3']); // در هر لایه فقط یک درخواست
 ```
 
 ### 2. از compression برای داده‌های بزرگ استفاده کنید
@@ -401,7 +498,9 @@ MIT © iprodev
 - [مثال‌ها - کوردی](EXAMPLES_KU.md)
 - [راهنمای بهینه‌سازی](PERFORMANCE.md)
 - [حل مشکلات](TROUBLESHOOTING.md)
-- [گزارش بهبودها](IMPROVEMENTS_SUMMARY.md)
+- [راهنمای ارتقا](MIGRATION.md)
+- [تغییرات](CHANGELOG.md)
+- [سیاست امنیتی](SECURITY.md)
 - [GitHub Issues](https://github.com/iprodev/php-easycache/issues)
 
 ---
@@ -409,6 +508,7 @@ MIT © iprodev
 ## 💬 پشتیبانی
 
 - 📧 ایمیل: dev@iprodev.com
+- 🔐 مشکلات امنیتی: [SECURITY.md](SECURITY.md) را ببینید (لطفاً issue عمومی باز نکنید)
 - 🐛 گزارش باگ: [GitHub Issues](https://github.com/iprodev/php-easycache/issues)
 - 💡 بحث و گفتگو: [GitHub Discussions](https://github.com/iprodev/php-easycache/discussions)
 
