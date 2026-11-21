@@ -1,14 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.5/phpunit.xsd"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
          bootstrap="vendor/autoload.php"
          colors="true"
          cacheDirectory=".phpunit.cache"
          executionOrder="depends,defects"
          requireCoverageMetadata="false"
          beStrictAboutOutputDuringTests="true"
+         displayDetailsOnTestsThatTriggerWarnings="true"
+         displayDetailsOnTestsThatTriggerDeprecations="true"
          failOnRisky="true"
-         failOnWarning="false">
+         failOnWarning="true">
     <testsuites>
         <testsuite name="EasyCache Test Suite">
             <directory>tests</directory>
@@ -23,5 +25,11 @@
 
     <php>
         <env name="APP_ENV" value="testing"/>
+        <!--
+            Optional integration backends (tests are skipped when unset):
+            EASYCACHE_TEST_REDIS_HOST, EASYCACHE_TEST_REDIS_PORT,
+            EASYCACHE_TEST_MYSQL_DSN, EASYCACHE_TEST_MYSQL_USER, EASYCACHE_TEST_MYSQL_PASSWORD,
+            EASYCACHE_TEST_PGSQL_DSN, EASYCACHE_TEST_PGSQL_USER, EASYCACHE_TEST_PGSQL_PASSWORD
+        -->
     </php>
 </phpunit>

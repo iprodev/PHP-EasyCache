@@ -7,6 +7,15 @@ namespace Iprodev\EasyCache\Serialization;
 interface SerializerInterface
 {
     public function serialize(mixed $value): string;
+
+    /**
+     * Must throw when the payload cannot be decoded (never return a
+     * placeholder value), so corrupt entries are treated as cache misses.
+     */
     public function deserialize(string $payload): mixed;
+
+    /**
+     * Unique name (1-255 bytes) stored with every entry.
+     */
     public function name(): string;
 }

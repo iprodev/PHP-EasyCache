@@ -1,5 +1,5 @@
 # Dependencies
-/vendor/
+/vendor
 composer.lock
 
 # IDE
@@ -11,10 +11,12 @@ composer.lock
 *~
 .DS_Store
 
-# Testing
+# Testing (local overrides of the committed *.dist files)
 /coverage/
 .phpunit.result.cache
-phpunit.xml.dist
+/.phpunit.cache/
+/phpunit.xml
+/phpstan.neon
 .phpstan/
 
 # Logs
@@ -39,3 +41,4 @@ Desktop.ini
 *.tmp
 *.temp
 *.cache
+/phpcs.xml
