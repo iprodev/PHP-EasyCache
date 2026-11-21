@@ -70,6 +70,9 @@
       "aliases": {
         "EasyCache": "Iprodev\\EasyCache\\Laravel\\Facades\\EasyCache"
       }
+    },
+    "branch-alias": {
+      "dev-master": "4.0.x-dev"
     }
   },
   "scripts": {
