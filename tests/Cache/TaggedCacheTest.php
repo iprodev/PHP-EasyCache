@@ -81,6 +81,13 @@ class TaggedCacheTest extends TestCase
         $this->assertSame(['t'], $view->getTags());
     }
 
+    public function testCachedNullIsReturnedByGetMultiple(): void
+    {
+        $view = $this->cache->tags('t');
+        $view->set('n', null);
+        $this->assertSame(['n' => null, 'm' => 'd'], $view->getMultiple(['n', 'm'], 'd'));
+    }
+
     public function testTagsAreValidated(): void
     {
         $this->expectException(InvalidArgument::class);

@@ -73,7 +73,7 @@ final class TaggedCache implements CacheInterface
 
         $result = [];
         foreach ($map as $internal => $original) {
-            $result[$original] = $values[$internal] ?? $default;
+            $result[$original] = array_key_exists($internal, $values) ? $values[$internal] : $default;
         }
         return $result;
     }
