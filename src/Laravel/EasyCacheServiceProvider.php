@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Laravel;
 
+use Illuminate\Cache\CacheManager;
+use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\ServiceProvider;
 use Iprodev\EasyCache\Cache\MultiTierCache;
@@ -43,6 +45,23 @@ final class EasyCacheServiceProvider extends ServiceProvider
             return $this->createCache($app);
         });
         $this->app->alias('easycache', MultiTierCache::class);
+
+        // Make Cache::store('easycache') work without editing config/cache.php.
+        $config = $this->app->make('config');
+        if ($config->get('cache.stores.easycache') === null) {
+            $config->set('cache.stores.easycache', ['driver' => 'easycache']);
+        }
+
+        $this->callAfterResolving('cache', function (CacheManager $manager): void {
+            $manager->extend('easycache', function (Application $app, array $config) use ($manager): Repository {
+                $prefix = $config['prefix'] ?? $app->make('config')->get('cache.prefix', '');
+
+                return $manager->repository(
+                    new EasyCacheStore($app->make('easycache'), is_string($prefix) ? $prefix : ''),
+                    $config
+                );
+            });
+        });
     }
 
     public function boot(): void
@@ -88,15 +107,14 @@ final class EasyCacheServiceProvider extends ServiceProvider
 
         return new MultiTierCache(
             $tiers,
-            $this->makeSerializer((array) ($cfg['serializer'] ?? [])),
-            $this->makeCompressor((array) ($cfg['compressor'] ?? [])),
-            (int) ($cfg['default_ttl'] ?? 600),
-            $logger,
-            null,
-            null,
-            $this->signingKey($cfg, $app),
-            $this->makeLockProvider($lockCfg, $cfg, $logger),
-            (float) ($lockCfg['timeout'] ?? 30)
+            serializer: $this->makeSerializer((array) ($cfg['serializer'] ?? [])),
+            compressor: $this->makeCompressor((array) ($cfg['compressor'] ?? [])),
+            defaultTtl: (int) ($cfg['default_ttl'] ?? 600),
+            logger: $logger,
+            signingKey: $this->signingKey($cfg, $app),
+            lockProvider: $this->makeLockProvider($lockCfg, $cfg, $logger),
+            lockTimeout: (float) ($lockCfg['timeout'] ?? 30),
+            allowUnsignedObjects: (bool) ($cfg['allow_unsigned_objects'] ?? false),
         );
     }
 

@@ -10,6 +10,7 @@ use Iprodev\EasyCache\Compression\CompressorInterface;
 use Iprodev\EasyCache\Compression\GzipCompressor;
 use Iprodev\EasyCache\Compression\NullCompressor;
 use Iprodev\EasyCache\Exceptions\InvalidArgument;
+use Iprodev\EasyCache\Lock\FileLockProvider;
 use Iprodev\EasyCache\Lock\NullLockProvider;
 use Iprodev\EasyCache\Serialization\JsonSerializer;
 use Iprodev\EasyCache\Serialization\NativeSerializer;
@@ -50,7 +51,6 @@ class MultiTierCacheTest extends TestCase
             $named['compressor'] ?? null,
             $defaultTtl,
             $named['logger'] ?? null,
-            null,
             $this->clock,
             $named['signingKey'] ?? null,
             $named['locks'] ?? new NullLockProvider()
@@ -161,8 +161,50 @@ class MultiTierCacheTest extends TestCase
             'object' => (object) ['prop' => 'value'],
         ];
 
-        $this->cache->set('complex', $data);
-        $this->assertEquals($data, $this->cache->get('complex'));
+        $cache = $this->makeCache(
+            [$this->storage],
+            3600,
+            serializer: new NativeSerializer([\stdClass::class]),
+            signingKey: str_repeat('k', 32)
+        );
+        $this->assertTrue($cache->set('complex', $data));
+        $this->assertEquals($data, $cache->get('complex'));
+    }
+
+    public function testDefaultSerializerRejectsObjects(): void
+    {
+        $logger = new MemoryLogger();
+        $cache = $this->makeCache([$this->storage], 3600, logger: $logger);
+
+        $this->assertFalse($cache->set('object', new \ArrayObject([1])));
+        $this->assertTrue($logger->hasMessageContaining('Cache set failed'));
+        $this->assertTrue($cache->set('array', ['still' => 'fine']));
+    }
+
+    public function testObjectCapableSerializerRequiresSigningKey(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('signingKey');
+        new MultiTierCache([$this->storage], serializer: new NativeSerializer(true));
+    }
+
+    public function testUnsignedObjectsCanBeAllowedExplicitly(): void
+    {
+        $cache = new MultiTierCache(
+            [$this->storage],
+            serializer: new NativeSerializer([\ArrayObject::class]),
+            clock: $this->clock,
+            lockProvider: new NullLockProvider(),
+            allowUnsignedObjects: true
+        );
+        $cache->set('o', new \ArrayObject([1, 2]));
+        $this->assertEquals(new \ArrayObject([1, 2]), $cache->get('o'));
+    }
+
+    public function testJsonSerializerNeedsNoSigningKey(): void
+    {
+        $cache = new MultiTierCache([$this->storage], serializer: new JsonSerializer());
+        $this->assertTrue($cache->set('k', ['a' => 1]));
     }
 
     public function testGetMultiple(): void
@@ -393,7 +435,7 @@ class MultiTierCacheTest extends TestCase
     public function testConstructorDoesNotTouchTheFilesystemForLocks(): void
     {
         $lockDir = $this->makeTempDir('easycache-locks');
-        new MultiTierCache([$this->storage], null, null, 60, null, $lockDir);
+        new MultiTierCache([$this->storage], lockProvider: new FileLockProvider($lockDir));
         $this->assertDirectoryDoesNotExist($lockDir);
     }
 }

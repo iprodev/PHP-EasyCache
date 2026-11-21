@@ -5,11 +5,10 @@ declare(strict_types=1);
 namespace Iprodev\EasyCache\Serialization;
 
 /**
- * JSON serialization. Safe against object injection, but lossy: objects come
- * back as associative arrays and floats without a fractional part
- * (e.g. 1.0) come back as integers.
+ * JSON serialization. Never instantiates objects, so it is safe with
+ * untrusted input, but lossy: objects come back as associative arrays.
  */
-final class JsonSerializer implements SerializerInterface
+final readonly class JsonSerializer implements SerializerInterface
 {
     /** @var int<1, max> */
     private int $depth;
@@ -36,5 +35,10 @@ final class JsonSerializer implements SerializerInterface
     public function name(): string
     {
         return 'json';
+    }
+
+    public function allowsObjects(): bool
+    {
+        return false;
     }
 }

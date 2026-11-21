@@ -38,14 +38,15 @@ composer require iprodev/php-easycache
 
 **Problem:**
 ```
-php-easycache requires php ^8.1 but your PHP version (7.4) does not satisfy that requirement.
+php-easycache requires php ^8.3 but your PHP version (8.1) does not satisfy that requirement.
 ```
 
 **Solution:**
-Upgrade to PHP 8.1 or higher:
+Upgrade to PHP 8.3 or higher, or stay on EasyCache 3.1 (`composer require iprodev/php-easycache:^3.1`),
+which supports PHP 8.1+ and still receives security fixes:
 ```bash
 # Ubuntu/Debian
-sudo apt-get install php8.1
+sudo apt-get install php8.3
 
 # Check version
 php -v
@@ -487,7 +488,7 @@ JsonException: Malformed UTF-8 characters
 ```php
 $cache = new MultiTierCache(
     [$storage],
-    new NativeSerializer(),  // More forgiving
+    new NativeSerializer(),  // Byte-safe for strings; scalars and arrays only by default
     $compressor
 );
 ```
@@ -505,12 +506,14 @@ Objects lose their class after retrieval.
 
 **Solution:**
 
-Use NativeSerializer (not JsonSerializer) for objects:
+Use NativeSerializer (not JsonSerializer) for objects, list their classes
+and configure a signing key:
 ```php
 $cache = new MultiTierCache(
     [$storage],
-    new NativeSerializer(),  // Preserves objects
-    $compressor
+    new NativeSerializer([User::class]),         // Preserves objects of these classes
+    $compressor,
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],  // required when objects are allowed
 );
 
 class User {
@@ -747,6 +750,25 @@ echo $cache->get('test');  // Should output: value
 
 ---
 
+## Upgrading to 4.0
+
+### "The configured serializer can create PHP objects..."
+
+Your serializer allows objects but no signing key is configured. Pass a
+`signingKey` (recommended), use `new NativeSerializer()` without objects, or,
+only if nobody else can write to any tier, `allowUnsignedObjects: true`.
+See [MIGRATION.md](MIGRATION.md).
+
+### `set()` returns false: "Cannot cache an object of class ..."
+
+The default `NativeSerializer` caches scalars and arrays only. Add the class
+to `allowedClasses` (and configure a signing key), or cache an array instead.
+
+### Cached objects are always misses
+
+Objects of classes missing from `allowedClasses` make the entry invalid on
+read. Add the class to `allowedClasses`.
+
 ## Upgrading to 3.1
 
 ### Everything is a cache miss right after the upgrade
@@ -770,7 +792,7 @@ no schema change is needed.
 The lock directory is not usable or another process held the lock longer than
 `lockTimeout`. The default lock directory is a per-user directory in the
 system temp dir that must be owned by the PHP user and not writable by others;
-configure `lockPath` (Laravel: `EASYCACHE_LOCK_PATH`) if that is not possible,
+configure `lockProvider: new FileLockProvider($dir)` (Laravel: `EASYCACHE_LOCK_PATH`) if that is not possible,
 or use `RedisLockProvider`. The value is still computed and cached.
 
 ### Laravel: "driver ... is unavailable and was skipped"

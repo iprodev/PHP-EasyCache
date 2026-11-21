@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] - Unreleased
+
+Secure-by-default release with a cleaned-up API. Entries written by 3.1 stay
+readable. See [MIGRATION.md](MIGRATION.md) for the upgrade steps.
+
+### Changed (breaking)
+- 🔒 `NativeSerializer` no longer allows objects by default (`allowedClasses: false`). Objects of classes that are not allowed are rejected when written (the write fails and is logged) and treated as invalid when read (a cache miss) instead of turning into `__PHP_Incomplete_Class`.
+- 🔒 A serializer that can create objects (`SerializerInterface::allowsObjects()`) requires a `signingKey`, unless `allowUnsignedObjects: true` is passed explicitly. This closes the remaining object-injection risk of 3.1 for unsigned caches.
+- ♻️ `SerializerInterface` has a new method `allowsObjects(): bool`.
+- ♻️ `getOrSetSWR()` (and `TaggedCache::getOrSetSWR()`) takes a `RefreshMode` enum (`RefreshMode::Sync`, `RefreshMode::Defer`) instead of an `$options` array.
+- ♻️ `MultiTierCache` is `final`. The `$lockPath` constructor parameter was removed (use `lockProvider: new FileLockProvider($dir)` or the builder's `lockPath()`); the following parameters moved up by one, so pass them by name.
+- ♻️ `BatchStorageInterface` was merged into `StorageInterface` (`getMany()`, `setMany()`, `deleteMany()` are now required). `prune()` moved to the new `PrunableStorageInterface`, implemented by `FileStorage` and `PdoStorage`; `RedisStorage` and `ApcuStorage` no longer have `prune()`.
+- ♻️ `Iprodev\EasyCache\Util\Lock` was renamed to `Iprodev\EasyCache\Lock\FileLock`.
+- ♻️ The v2 compatibility wrapper `Iprodev\EasyCache\EasyCache` was removed.
+- ♻️ Requires PHP 8.3+, `psr/simple-cache` ^3.0 and `psr/log` ^2.0 || ^3.0. The Laravel integration targets Laravel 12+.
+- ♻️ Laravel: with `EASYCACHE_SIGN=false` and the php serializer allowing objects, the cache refuses to start unless `EASYCACHE_ALLOW_UNSIGNED_OBJECTS=true`.
+
+### Added
+- ✨ `MultiTierCache::builder()` fluent builder (`CacheBuilder`).
+- ✨ `RefreshMode` enum.
+- ✨ `PrunableStorageInterface`.
+- ✨ Atomic `increment()`, `decrement()` and `add()` on `MultiTierCache` and `TaggedCache`. They are atomic through the lock provider (per machine with file locks, across servers with `RedisLockProvider`); entries stay signed and readable with `get()`.
+- ✨ Laravel cache store driver `easycache` (`Cache::store('easycache')`), registered automatically, with Laravel tags, atomic locks (`Cache::lock()`), `increment`/`decrement`/`add` (rate limiter) and one-to-one encoding of Laravel keys.
+- ✨ PSR-6 adapter `Psr6\CacheItemPool` with deferred saves committed in one batch per expiry (requires `psr/cache`).
+
+### Changed
+- ⚡ `TaggedCache` reads the tag versions once per operation (also for `getMultiple()`/`setMultiple()`/`deleteMultiple()`) and creates missing versions atomically.
+
+### Internal
+- ♻️ Typed phpredis and Predis adapters replace untyped client calls; PHPStan runs at level max.
+- ♻️ Readonly classes and typed class constants (PHP 8.3).
+- ✅ CI on PHP 8.3, 8.4 and 8.5; Laravel tests on 12/13.
+
+---
+
 ## [3.1.0] - 2026-11-21
 
 Security fixes, bug fixes and new features. Cache entries written by 3.0.x

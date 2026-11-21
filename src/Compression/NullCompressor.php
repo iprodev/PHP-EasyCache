@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Compression;
 
-final class NullCompressor implements CompressorInterface
+final readonly class NullCompressor implements CompressorInterface
 {
     public function compress(string $data): string
     {

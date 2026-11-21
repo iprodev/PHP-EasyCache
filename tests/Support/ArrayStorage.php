@@ -4,13 +4,13 @@ declare(strict_types=1);
 
 namespace Iprodev\EasyCache\Tests\Support;
 
-use Iprodev\EasyCache\Storage\BatchStorageInterface;
+use Iprodev\EasyCache\Storage\PrunableStorageInterface;
 use Psr\Clock\ClockInterface;
 
 /**
  * In-memory storage that honours TTLs through a PSR-20 clock and records calls.
  */
-final class ArrayStorage implements BatchStorageInterface
+final class ArrayStorage implements PrunableStorageInterface
 {
     /** @var array<string, array{payload: string, expires: int}> */
     public array $data = [];

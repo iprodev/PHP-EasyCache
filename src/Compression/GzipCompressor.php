@@ -6,9 +6,9 @@ namespace Iprodev\EasyCache\Compression;
 
 use RuntimeException;
 
-final class GzipCompressor implements CompressorInterface
+final readonly class GzipCompressor implements CompressorInterface
 {
-    public const DEFAULT_MAX_DECOMPRESSED_SIZE = 64 * 1024 * 1024;
+    public const int DEFAULT_MAX_DECOMPRESSED_SIZE = 64 * 1024 * 1024;
 
     private int $level;
     private int $maxDecompressedSize;

@@ -76,9 +76,26 @@ class ServiceProviderTest extends TestCase
         $this->assertNotSame($this->app['config']->get('app.key'), $key);
     }
 
-    public function testSigningCanBeDisabled(): void
+    public function testSigningCanBeDisabledWithoutObjects(): void
     {
         $this->app['config']->set('easycache.sign', false);
+        $this->app['config']->set('easycache.serializer.allowed_classes', false);
+        $this->assertNull($this->readPrivate($this->app->make('easycache'), 'signingKey'));
+    }
+
+    public function testUnsignedObjectsAreRefusedUnlessAllowed(): void
+    {
+        $this->app['config']->set('easycache.sign', false);
+
+        try {
+            $this->app->make('easycache');
+            $this->fail('Unsigned entries with object support must be refused');
+        } catch (\InvalidArgumentException) {
+            $this->addToAssertionCount(1);
+        }
+
+        $this->app->forgetInstance('easycache');
+        $this->app['config']->set('easycache.allow_unsigned_objects', true);
         $this->assertNull($this->readPrivate($this->app->make('easycache'), 'signingKey'));
     }
 

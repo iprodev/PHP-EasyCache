@@ -1,11 +1,13 @@
 # مرجع API
 
-مستندات کامل API برای PHP EasyCache نسخهٔ 3.1.
+مستندات کامل API برای PHP EasyCache نسخهٔ 4.0.
 
 ## فهرست مطالب
 
 - [MultiTierCache](#multitiercache)
+- [CacheBuilder](#cachebuilder)
 - [TaggedCache](#taggedcache)
+- [آداپتور PSR-6](#آداپتور-psr-6)
 - [Storage Backends](#storage-backends)
 - [قفل‌ها (Locks)](#قفلها-locks)
 - [Serializers](#serializers)
@@ -31,28 +33,30 @@ public function __construct(
     ?CompressorInterface $compressor = null,
     int $defaultTtl = 3600,
     ?LoggerInterface $logger = null,
-    ?string $lockPath = null,
     ?ClockInterface $clock = null,
     ?string $signingKey = null,
     ?LockProviderInterface $lockProvider = null,
-    float $lockTimeout = 30.0
+    float $lockTimeout = 30.0,
+    bool $allowUnsignedObjects = false
 )
 ```
 
+`MultiTierCache` کلاس `final` است. آرگومان‌های بعد از `$logger` را با نام (named arguments) بدهید یا از [`MultiTierCache::builder()`](#cachebuilder) استفاده کنید.
+
 **پارامترها:**
 - `$tiers` (StorageInterface[]): لایه‌های ذخیره‌سازی، مرتب از سریع‌ترین به کندترین
-- `$serializer`: پیش‌فرض `NativeSerializer`
+- `$serializer`: پیش‌فرض `NativeSerializer` بدون پشتیبانی از شیء
 - `$compressor`: پیش‌فرض `NullCompressor`
 - `$defaultTtl` (int): TTL پیش‌فرض به ثانیه وقتی TTL داده نشود. مقدار `0` یعنی بدون انقضا (پیش‌فرض: 3600)
 - `$logger`: logger سازگار با PSR-3. به هر لایه‌ای هم که `LoggerAwareInterface` را پیاده کرده و هنوز logger ندارد داده می‌شود
-- `$lockPath` (string|null): دایرکتوری فایل‌های قفل (پیش‌فرض: یک دایرکتوری خصوصی مخصوص همان کاربر در temp سیستم). اگر `$lockProvider` داده شود نادیده گرفته می‌شود
 - `$clock` (`Psr\Clock\ClockInterface`): منبع زمان (پیش‌فرض: `SystemClock`)
 - `$signingKey` (string|null): کلید مخفی با حداقل ۱۶ بایت. اگر تنظیم شود رکوردها با HMAC-SHA256 امضا می‌شوند و رکوردهای بدون امضا یا دستکاری‌شده **پیش از** deserialize شدن رد می‌شوند
-- `$lockProvider`: پیاده‌سازی قفل (پیش‌فرض: `FileLockProvider`)
+- `$lockProvider`: پیاده‌سازی قفل (پیش‌فرض: `FileLockProvider` در یک دایرکتوری خصوصی مخصوص کاربر در temp سیستم)
 - `$lockTimeout` (float): حداکثر ثانیه‌های انتظار برای قفل در cache miss؛ بعد از آن مقدار بدون قفل محاسبه می‌شود (پیش‌فرض: 30)
+- `$allowUnsignedObjects` (bool): اجازهٔ استفاده از serializerی که شیء می‌سازد بدون کلید امضا. فقط وقتی امن است که هیچ کس دیگری نتواند در هیچ لایه‌ای بنویسد
 
 **استثناها:**
-- `\InvalidArgumentException` اگر `$tiers` خالی باشد یا عضوی غیر از `StorageInterface` داشته باشد، کلید امضا کوتاه‌تر از ۱۶ بایت باشد، یا نام serializer/compressor خالی یا بیش از ۲۵۵ بایت باشد
+- `\InvalidArgumentException` اگر `$tiers` خالی باشد یا عضوی غیر از `StorageInterface` داشته باشد، کلید امضا کوتاه‌تر از ۱۶ بایت باشد، نام serializer/compressor خالی یا بیش از ۲۵۵ بایت باشد، یا serializer بتواند شیء بسازد (`allowsObjects()`) و نه کلید امضا داده شده باشد نه `allowUnsignedObjects: true`
 
 سازنده به فایل‌سیستم دست نمی‌زند: دایرکتوری قفل در اولین استفاده ساخته می‌شود.
 
@@ -148,7 +152,7 @@ public function getMultiple(iterable $keys, mixed $default = null): array
 
 **استثنا:** `InvalidArgument` اگر یکی از کلیدها نامعتبر یا غیررشته‌ای باشد
 
-storageهایی که `BatchStorageInterface` را پیاده می‌کنند در هر لایه با یک درخواست خوانده می‌شوند، و از لایه‌های پایین‌تر فقط کلیدهایی پرسیده می‌شود که هنوز پیدا نشده‌اند.
+هر لایه با یک فراخوانی `getMany()` خوانده می‌شود (در Redis، APCu و PDO یعنی یک درخواست)، و از لایه‌های پایین‌تر فقط کلیدهایی پرسیده می‌شود که هنوز پیدا نشده‌اند.
 
 ```php
 $cache->getMultiple(['key1', 'key2', 'key3'], null);
@@ -186,7 +190,7 @@ public function getOrSetSWR(
     null|int|DateInterval $ttl = null,
     int $swrSeconds = 0,
     int $staleIfErrorSeconds = 0,
-    array $options = []
+    RefreshMode $mode = RefreshMode::Sync
 ): mixed
 ```
 
@@ -195,10 +199,10 @@ public function getOrSetSWR(
 - `$ttl`: مدت تازه بودن. `null` یعنی TTL پیش‌فرض (`0` = بدون انقضا). مقدار کوچک‌تر یا مساوی صفر یعنی محاسبه **بدون کش کردن**
 - `$swrSeconds`: تا چند ثانیه بعد از انقضا مقدار قدیمی سرو شود و همزمان تازه‌سازی انجام شود
 - `$staleIfErrorSeconds`: تا چند ثانیه بعد از انقضا، اگر producer خطا داد، مقدار قدیمی سرو شود
-- `$options['mode']`: `'sync'` (پیش‌فرض) یا `'defer'`
+- `$mode`: `RefreshMode::Sync` (پیش‌فرض) یا `RefreshMode::Defer` (`Iprodev\EasyCache\Cache\RefreshMode`)
 
 **استثناها:**
-- `InvalidArgument` برای کلید یا mode نامعتبر
+- `InvalidArgument` برای کلید نامعتبر
 - خطای `$producer` وقتی مقدار قدیمی قابل‌استفاده‌ای وجود نداشته باشد
 
 **رفتار:**
@@ -206,7 +210,7 @@ public function getOrSetSWR(
 | وضعیت رکورد | چه اتفاقی می‌افتد |
 |---|---|
 | تازه | فوراً برگردانده می‌شود |
-| منقضی، داخل `swrSeconds` | فقط یک پروسه رکورد را تازه می‌کند؛ پروسه‌هایی که قفل را نمی‌گیرند بدون انتظار مقدار قدیمی را می‌گیرند. در حالت `sync` پروسهٔ تازه‌کننده مقدار **جدید** را برمی‌گرداند؛ در حالت `defer` مقدار قدیمی برگردانده می‌شود و تازه‌سازی بعد از ارسال پاسخ انجام می‌شود (PHP-FPM/LiteSpeed، در غیر این صورت `sync`). اگر تازه‌سازی شکست بخورد مقدار قدیمی برگردانده می‌شود |
+| منقضی، داخل `swrSeconds` | فقط یک پروسه رکورد را تازه می‌کند؛ پروسه‌هایی که قفل را نمی‌گیرند بدون انتظار مقدار قدیمی را می‌گیرند. با `RefreshMode::Sync` پروسهٔ تازه‌کننده مقدار **جدید** را برمی‌گرداند؛ با `RefreshMode::Defer` مقدار قدیمی برگردانده می‌شود و تازه‌سازی بعد از ارسال پاسخ انجام می‌شود (PHP-FPM/LiteSpeed، در غیر این صورت `Sync`). اگر تازه‌سازی شکست بخورد مقدار قدیمی برگردانده می‌شود |
 | منقضی، فقط داخل `staleIfErrorSeconds` | دوباره محاسبه می‌شود؛ فقط اگر producer خطا بدهد مقدار قدیمی برگردانده می‌شود |
 | وجود ندارد (یا خیلی قدیمی است) | زیر قفل مخصوص همان کلید محاسبه می‌شود (حداکثر انتظار `lockTimeout`). بعد از گرفتن قفل دوباره کش بررسی می‌شود، پس درخواست‌های همزمان producer را فقط یک بار اجرا می‌کنند |
 
@@ -219,7 +223,7 @@ $data = $cache->getOrSetSWR(
     ttl: 300,
     swrSeconds: 60,
     staleIfErrorSeconds: 600,
-    options: ['mode' => 'defer'],
+    mode: RefreshMode::Defer,
 );
 ```
 
@@ -245,6 +249,36 @@ public function forever(string $key, mixed $value): bool
 
 ---
 
+### ()increment و ()decrement
+
+```php
+public function increment(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+public function decrement(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+```
+
+به‌صورت اتمیک `$by` را اضافه (یا کم) می‌کند و مقدار جدید را برمی‌گرداند.
+
+- رکورد ناموجود یا منقضی از ۰ شروع می‌شود و با `$ttl` ساخته می‌شود (`null` = TTL پیش‌فرض، `<= 0` = بدون انقضا). رکورد موجود زمان انقضای خودش را نگه می‌دارد.
+- رشتهٔ عددی صحیح (`"41"`) پذیرفته می‌شود؛ هر مقدار دیگری باعث برگشت `false` می‌شود.
+- اگر قفل در مدت `lockTimeout` گرفته نشود `false` برمی‌گرداند.
+- اتمیک بودن از طریق lock provider است: در یک ماشین با `FileLockProvider` و بین سرورها با `RedisLockProvider`. رکوردها همچنان امضا می‌شوند و با `get()` خوانده می‌شوند.
+
+```php
+$attempts = $cache->increment('login.' . sha1($ip), 1, 60); // پنجرهٔ ۶۰ ثانیه‌ای
+```
+
+---
+
+### ()add
+
+```php
+public function add(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
+```
+
+مقدار را فقط وقتی ذخیره می‌کند که کلید رکورد تازه‌ای نداشته باشد (اتمیک، مثل `increment()`). `$ttl`: `null` = TTL پیش‌فرض، `<= 0` = بدون انقضا. اگر مقدار ذخیره شود `true` برمی‌گرداند.
+
+---
+
 ### ()tags و ()invalidateTags
 
 ```php
@@ -267,7 +301,7 @@ $cache->invalidateTags('team-7');
 public function prune(): int
 ```
 
-**خروجی:** تعداد رکوردهای حذف‌شده. `FileStorage` و `PdoStorage` رکوردهای منقضی را حذف می‌کنند (FileStorage فایل‌هایی با قالب ناشناخته و فایل‌های موقت رهاشده را هم پاک می‌کند)؛ APCu و Redis خودشان رکوردها را منقضی می‌کنند.
+**خروجی:** تعداد رکوردهای حذف‌شده از لایه‌هایی که `PrunableStorageInterface` را پیاده می‌کنند. `FileStorage` و `PdoStorage` رکوردهای منقضی را حذف می‌کنند (FileStorage فایل‌هایی با قالب ناشناخته و فایل‌های موقت رهاشده را هم پاک می‌کند)؛ APCu و Redis خودشان رکوردها را منقضی می‌کنند.
 
 ---
 
@@ -289,9 +323,47 @@ public function resetStats(): void
 
 ---
 
+## CacheBuilder
+
+جایگزین روان (fluent) برای سازنده که `MultiTierCache::builder()` برمی‌گرداند:
+
+```php
+$cache = MultiTierCache::builder()
+    ->tier(new ApcuStorage('app:', maxTtl: 60))   // لایه‌ها به ترتیب، سریع‌ترین اول
+    ->tiers($redisStorage, $fileStorage)          // یا چند لایه با هم
+    ->serializer(new NativeSerializer([UserDto::class]))
+    ->compressor(new GzipCompressor(3))
+    ->signingKey($_ENV['EASYCACHE_SIGNING_KEY'])
+    ->defaultTtl(600)
+    ->logger($logger)
+    ->lockProvider(new RedisLockProvider($redis))  // یا ->lockPath('/var/lib/app/locks')
+    ->lockTimeout(10.0)
+    ->build();
+```
+
+`build()` بدون لایه `\InvalidArgumentException` می‌دهد و همان بررسی‌های سازنده را انجام می‌دهد.
+
+---
+
 ## TaggedCache
 
-نمای PSR-16 که `MultiTierCache::tags()` برمی‌گرداند. متدهای `get`، `set`، `delete`، `has`، `getMultiple`، `setMultiple`، `deleteMultiple`، `getOrSetSWR`، `remember` و `forever` را دارد. `clear()` روی این نما tagهای آن را باطل می‌کند. رکوردها باید با همان مجموعه tagی خوانده شوند که با آن نوشته شده‌اند (ترتیب مهم نیست). طول کلید حداکثر ۲۱۷ بایت است.
+نمای PSR-16 که `MultiTierCache::tags()` برمی‌گرداند. متدهای `get`، `set`، `delete`، `has`، `getMultiple`، `setMultiple`، `deleteMultiple`، `getOrSetSWR`، `remember`، `forever`، `increment`، `decrement` و `add` را دارد. نسخهٔ tagها در هر عملیات فقط یک بار خوانده می‌شود (برای متدهای `*Multiple()` هم). `clear()` روی این نما tagهای آن را باطل می‌کند. رکوردها باید با همان مجموعه tagی خوانده شوند که با آن نوشته شده‌اند (ترتیب مهم نیست). طول کلید حداکثر ۲۱۷ بایت است.
+
+---
+
+## آداپتور PSR-6
+
+کلاس `Iprodev\EasyCache\Psr6\CacheItemPool` رابط `Psr\Cache\CacheItemPoolInterface` را روی یک `MultiTierCache` پیاده می‌کند (به `psr/cache` نسخهٔ ۳ نیاز دارد).
+
+```php
+public function __construct(MultiTierCache $cache, ?ClockInterface $clock = null)
+```
+
+- اگر به کش clock داده‌اید، همان را به pool هم بدهید تا زمان انقضا یکسان محاسبه شود.
+- `getItem()`، `getItems()`، `hasItem()`، `save()`، `deleteItem(s)()` و `clear()` مستقیماً روی کش اجرا می‌شوند.
+- `CacheItem::expiresAfter()` و `expiresAt()` زمان انقضا را تعیین می‌کنند؛ بدون آن‌ها TTL پیش‌فرض کش استفاده می‌شود. ذخیرهٔ آیتمی که از قبل منقضی شده کلید را حذف می‌کند.
+- آیتم‌های `saveDeferred()` فوراً در `getItem()` دیده می‌شوند و با `commit()` (یک `setMultiple()` برای هر زمان انقضا) نوشته می‌شوند؛ حداکثر هنگام از بین رفتن pool.
+- کلید نامعتبر `Iprodev\EasyCache\Psr6\InvalidArgument` (یک `Psr\Cache\InvalidArgumentException`) پرتاب می‌کند.
 
 ---
 
@@ -307,20 +379,20 @@ interface StorageInterface
     public function delete(string $key): bool;          // برای کلید ناموجود هم true
     public function has(string $key): bool;
     public function clear(): bool;                      // فقط رکوردهای همین storage
-    public function prune(): int;                       // تعداد رکوردهای حذف‌شده
+    public function getMany(array $keys): array;        // payloadهای پیداشده بر اساس کلید
+    public function setMany(array $payloads, int $ttl): bool;
+    public function deleteMany(array $keys): bool;
 }
 ```
 
-### BatchStorageInterface
+### PrunableStorageInterface
 
-اختیاری؛ همهٔ storageهای داخلی آن را پیاده کرده‌اند:
+برای backendهایی که رکوردها را خودشان منقضی نمی‌کنند (`FileStorage` و `PdoStorage`):
 
 ```php
-interface BatchStorageInterface extends StorageInterface
+interface PrunableStorageInterface extends StorageInterface
 {
-    public function getMany(array $keys): array;              // payloadهای پیداشده بر اساس کلید
-    public function setMany(array $payloads, int $ttl): bool;
-    public function deleteMany(array $keys): bool;
+    public function prune(): int; // تعداد رکوردهای حذف‌شده
 }
 ```
 
@@ -386,7 +458,7 @@ public function __construct(object $redisClient, string $prefix = 'ec:', ?Logger
 **نکات:**
 - `SETEX` برای TTL، `MGET` برای خواندن دسته‌ای و pipeline برای نوشتن دسته‌ای
 - `clear()` از `SCAN` غیرمسدودکننده با prefix escape‌شده استفاده می‌کند (برای Predis هم) و prefix سطح کلاینت (`Redis::OPT_PREFIX` و گزینهٔ `prefix` در Predis) را درست مدیریت می‌کند
-- `prune()` صفر برمی‌گرداند (Redis خودش کلیدها را منقضی می‌کند)
+- Redis خودش کلیدها را منقضی می‌کند، پس `RedisStorage` متد `prune()` ندارد
 
 ---
 
@@ -457,7 +529,9 @@ public function __construct(object $redis, string $prefix = 'ec:lock:', int $ttl
 
 قفل را غیرفعال می‌کند (هر قفلی فوراً گرفته می‌شود).
 
-### Util\Lock
+### FileLock
+
+`Iprodev\EasyCache\Lock\FileLock` (تا پیش از 4.0 با نام `Util\Lock`):
 
 ```php
 public function __construct(string $path, bool $removeOnRelease = true)
@@ -480,21 +554,27 @@ interface SerializerInterface
     public function serialize(mixed $value): string;
     public function deserialize(string $payload): mixed; // برای ورودی نامعتبر باید exception بدهد
     public function name(): string;                      // ۱ تا ۲۵۵ بایت، همراه هر رکورد ذخیره می‌شود
+    public function allowsObjects(): bool;               // آیا deserialize() می‌تواند شیء بسازد؟
 }
 ```
+
+serializerهایی که `allowsObjects()` آن‌ها `true` است در `MultiTierCache` به کلید امضا (یا `allowUnsignedObjects: true`) نیاز دارند.
 
 ### NativeSerializer
 
 ```php
-public function __construct(bool|array $allowedClasses = true, int $maxDepth = 0)
+public function __construct(bool|array $allowedClasses = false, int $maxDepth = 0)
 ```
 
-- `$allowedClasses`: `true` (هر کلاسی)، `false` (بدون شیء) یا فهرستی از نام کلاس‌ها. بقیهٔ کلاس‌ها به `__PHP_Incomplete_Class` تبدیل می‌شوند
+- `$allowedClasses`: `false` (پیش‌فرض: بدون شیء، فقط مقادیر ساده و آرایه)، فهرستی از نام کلاس‌ها، یا `true` (هر کلاسی)
+- نوشتن شیئی از کلاس غیرمجاز `\InvalidArgumentException` می‌دهد (`set()` مقدار `false` برمی‌گرداند و آن را لاگ می‌کند)
+- خواندن رکوردی که شیئی از کلاس غیرمجاز دارد `\UnexpectedValueException` می‌دهد (یعنی miss)
+- `allowsObjects()` همیشه `true` است مگر اینکه `$allowedClasses` برابر `false` (یا فهرست خالی) باشد
 - `$maxDepth`: حداکثر عمق تودرتو بودن (۰ = پیش‌فرض PHP)
 - برای payload نامعتبر `\UnexpectedValueException` می‌دهد (مقدار `false` ذخیره‌شده همچنان `false` برگردانده می‌شود)
 - نام: `php`
 
-> unserialize کردن داده‌ای که مهاجم کنترلش می‌کند می‌تواند به اجرای کد برسد. `$allowedClasses` را محدود کنید و/یا از کلید امضا استفاده کنید.
+> unserialize کردن شیئی که مهاجم کنترلش می‌کند می‌تواند به اجرای کد برسد؛ به همین دلیل پشتیبانی از شیء به کلید امضا نیاز دارد.
 
 ### JsonSerializer
 
@@ -502,7 +582,7 @@ public function __construct(bool|array $allowedClasses = true, int $maxDepth = 0
 public function __construct(int $depth = 512)
 ```
 
-- هرگز شیء نمی‌سازد: اشیاء به‌صورت آرایهٔ انجمنی برمی‌گردند
+- هرگز شیء نمی‌سازد: اشیاء به‌صورت آرایهٔ انجمنی برمی‌گردند (`allowsObjects()` برابر `false`)
 - نوع float حفظ می‌شود (`1.0` همان float می‌ماند)
 - برای دادهٔ نامعتبر `\JsonException` می‌دهد
 - نام: `json`
@@ -608,6 +688,17 @@ EasyCache::remember('stats', 300, fn () => $this->computeStats());
 
 Facade همهٔ متدهای عمومی `MultiTierCache` را در اختیار می‌گذارد.
 
+### درایور cache store
+
+Service provider یک درایور `easycache` و store متناظر `cache.stores.easycache` را ثبت می‌کند (مگر اینکه خودتان تعریفش کرده باشید)، پس `Cache::store('easycache')` بدون تنظیمات کار می‌کند. برای پیش‌فرض کردنش `CACHE_STORE=easycache` بگذارید.
+
+کلاس `Iprodev\EasyCache\Laravel\EasyCacheStore` رابط‌های `Store` (از طریق `TaggableStore`) و `LockProvider` لاراول را پیاده می‌کند:
+
+- `get`، `many`، `put`، `putMany`، `add` (اتمیک)، `increment`/`decrement` (اتمیک؛ شمارنده‌های جدید منقضی نمی‌شوند)، `forever`، `touch`، `forget`، `flush`
+- tagهای لاراول (`Cache::store('easycache')->tags([...])`)
+- قفل‌های اتمیک (`Cache::store('easycache')->lock($name, $seconds)`) بر پایهٔ `add()`
+- کلیدها: پیشوند store (گزینهٔ `prefix`، پیش‌فرض `cache.prefix`) اضافه می‌شود؛ کاراکترهایی که در کلید EasyCache مجاز نیستند و `%` به‌صورت percent-encoding (یک‌به‌یک) کد می‌شوند و کلیدهای بلندتر از ۲۵۵ بایت hash می‌شوند
+
 ### دستورات Artisan
 
 ```bash
@@ -626,6 +717,7 @@ return [
     'default_ttl' => 600,
     'sign' => true,                     // امضای رکوردها...
     'signing_key' => null,              // ...با این کلید یا کلیدی مشتق از APP_KEY
+    'allow_unsigned_objects' => false,  // برای کش کردن شیء با 'sign' => false لازم است
     'lock' => ['driver' => 'file', 'path' => storage_path('framework/cache/easycache-locks'), 'timeout' => 30],
     'apcu' => ['prefix' => 'ec:', 'max_ttl' => 60],
     'redis' => ['client' => 'phpredis', 'host' => '127.0.0.1', 'port' => 6379, 'prefix' => 'ec:'],

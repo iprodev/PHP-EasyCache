@@ -17,7 +17,7 @@ use RuntimeException;
  * deleted on one server are not visible to the others. Keep its TTL short
  * when it is used as a first tier in front of a shared tier.
  */
-final class ApcuStorage implements BatchStorageInterface, LoggerAwareInterface
+final class ApcuStorage implements StorageInterface, LoggerAwareInterface
 {
     use LogsErrors;
 
@@ -150,7 +150,10 @@ final class ApcuStorage implements BatchStorageInterface, LoggerAwareInterface
         $failed = 0;
 
         foreach ($iterator as $item) {
-            $key = (string) $item['key'];
+            $key = is_array($item) ? ($item['key'] ?? null) : null;
+            if (!is_string($key)) {
+                continue;
+            }
             if (!apcu_delete($key) && apcu_exists($key)) {
                 $failed++;
             }
@@ -161,12 +164,6 @@ final class ApcuStorage implements BatchStorageInterface, LoggerAwareInterface
         }
 
         return $failed === 0;
-    }
-
-    public function prune(): int
-    {
-        // APCu handles expiration automatically
-        return 0;
     }
 
     private static function isEnabled(): bool

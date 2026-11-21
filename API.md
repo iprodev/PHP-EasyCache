@@ -1,11 +1,13 @@
 # API Reference
 
-Complete API documentation for PHP EasyCache v3.1.
+Complete API documentation for PHP EasyCache v4.0.
 
 ## Table of Contents
 
 - [MultiTierCache](#multitiercache)
+- [CacheBuilder](#cachebuilder)
 - [TaggedCache](#taggedcache)
+- [PSR-6 Adapter](#psr-6-adapter)
 - [Storage Backends](#storage-backends)
 - [Locks](#locks)
 - [Serializers](#serializers)
@@ -31,28 +33,35 @@ public function __construct(
     ?CompressorInterface $compressor = null,
     int $defaultTtl = 3600,
     ?LoggerInterface $logger = null,
-    ?string $lockPath = null,
     ?ClockInterface $clock = null,
     ?string $signingKey = null,
     ?LockProviderInterface $lockProvider = null,
-    float $lockTimeout = 30.0
+    float $lockTimeout = 30.0,
+    bool $allowUnsignedObjects = false
 )
 ```
 
+`MultiTierCache` is `final`. Pass the arguments after `$logger` by name, or use
+[`MultiTierCache::builder()`](#cachebuilder).
+
 **Parameters:**
 - `$tiers` (StorageInterface[]): Storages ordered from fastest to slowest
-- `$serializer`: Serializer (default: `NativeSerializer`)
+- `$serializer`: Serializer (default: `NativeSerializer` without objects)
 - `$compressor`: Compressor (default: `NullCompressor`)
 - `$defaultTtl` (int): TTL used when none is given, in seconds. `0` = never expire (default: 3600)
 - `$logger`: PSR-3 logger. It is also handed to every tier that implements `LoggerAwareInterface` and has no logger yet
-- `$lockPath` (string|null): Directory for file locks (default: a private per-user directory in the system temp dir). Ignored when `$lockProvider` is given
 - `$clock` (Psr\Clock\ClockInterface|null): Time source (default: `SystemClock`)
 - `$signingKey` (string|null): Secret of at least 16 bytes. When set, entries are signed with HMAC-SHA256 and unsigned or tampered entries are rejected before they are deserialized
-- `$lockProvider` (LockProviderInterface|null): Lock implementation (default: `FileLockProvider`)
+- `$lockProvider` (LockProviderInterface|null): Lock implementation (default: `FileLockProvider` in a private per-user temp directory)
 - `$lockTimeout` (float): Seconds to wait for a lock on a cache miss before computing without it (default: 30)
+- `$allowUnsignedObjects` (bool): Allow a serializer that can create objects without a signing key. Only safe when nobody else can write to any tier
 
 **Throws:**
-- `\InvalidArgumentException` if `$tiers` is empty or contains something that is not a `StorageInterface`, if the signing key is shorter than 16 bytes, or if a serializer/compressor name is empty or longer than 255 bytes
+- `\InvalidArgumentException` if:
+  - `$tiers` is empty or contains something that is not a `StorageInterface`;
+  - the signing key is shorter than 16 bytes;
+  - a serializer/compressor name is empty or longer than 255 bytes;
+  - the serializer can create objects (`allowsObjects()`) and there is neither a signing key nor `allowUnsignedObjects: true`.
 
 The constructor does not touch the filesystem: the lock directory is created on first use.
 
@@ -161,8 +170,8 @@ public function getMultiple(iterable $keys, mixed $default = null): array
 
 **Throws:** `InvalidArgument` if any key is invalid or not a string
 
-Storages implementing `BatchStorageInterface` are read in one round trip per
-tier, and lower tiers are only asked for keys that are still missing.
+Each tier is read with one `getMany()` call (one round trip on Redis, APCu
+and PDO), and lower tiers are only asked for keys that are still missing.
 
 ```php
 $cache->getMultiple(['key1', 'key2', 'key3'], null);
@@ -200,7 +209,7 @@ public function getOrSetSWR(
     null|int|DateInterval $ttl = null,
     int $swrSeconds = 0,
     int $staleIfErrorSeconds = 0,
-    array $options = []
+    RefreshMode $mode = RefreshMode::Sync
 ): mixed
 ```
 
@@ -209,12 +218,12 @@ public function getOrSetSWR(
 - `$ttl`: Fresh lifetime. `null` = default TTL (`0` = never expire). A value `<= 0` computes the value **without caching** it
 - `$swrSeconds` (int): How long after expiry the stale value may be served while it is refreshed
 - `$staleIfErrorSeconds` (int): How long after expiry the stale value may be served if the producer fails
-- `$options['mode']`: `'sync'` (default) or `'defer'`
+- `$mode`: `RefreshMode::Sync` (default) or `RefreshMode::Defer` (`Iprodev\EasyCache\Cache\RefreshMode`)
 
 **Returns:** The cached or computed value
 
 **Throws:**
-- `InvalidArgument` if the key or mode is invalid
+- `InvalidArgument` if the key is invalid
 - Exceptions from `$producer` when there is no usable stale value
 
 **Behaviour:**
@@ -222,7 +231,7 @@ public function getOrSetSWR(
 | State of the entry | What happens |
 |---|---|
 | Fresh | Returned immediately |
-| Expired, within `swrSeconds` | One process refreshes the entry; processes that cannot get the lock get the stale value without waiting. In `sync` mode the refreshing process returns the new value; in `defer` mode the stale value is returned and the refresh runs after the response is sent (PHP-FPM/LiteSpeed, otherwise `sync`). If the refresh fails, the stale value is returned |
+| Expired, within `swrSeconds` | One process refreshes the entry; processes that cannot get the lock get the stale value without waiting. With `RefreshMode::Sync` the refreshing process returns the new value; with `RefreshMode::Defer` the stale value is returned and the refresh runs after the response is sent (PHP-FPM/LiteSpeed, otherwise `Sync`). If the refresh fails, the stale value is returned |
 | Expired, only within `staleIfErrorSeconds` | Recomputed. If the producer throws, the stale value is returned instead |
 | Missing (or too old) | Computed under a per-key lock (waiting at most `lockTimeout`). After getting the lock the cache is checked again, so concurrent misses run the producer once |
 
@@ -235,7 +244,7 @@ $data = $cache->getOrSetSWR(
     ttl: 300,
     swrSeconds: 60,
     staleIfErrorSeconds: 600,
-    options: ['mode' => 'defer'],
+    mode: RefreshMode::Defer,
 );
 ```
 
@@ -258,6 +267,41 @@ public function forever(string $key, mixed $value): bool
 ```
 
 Stores a value without expiry.
+
+---
+
+### increment() / decrement()
+
+```php
+public function increment(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+public function decrement(string $key, int $by = 1, null|int|DateInterval $ttl = null): int|false
+```
+
+Atomically add (or subtract) `$by` and return the new value.
+
+- A missing or expired entry starts at 0 and is created with `$ttl`
+  (`null` = default TTL, `<= 0` = no expiry). An existing entry keeps its expiry.
+- Integer strings (`"41"`) are accepted; any other value makes the call return `false`.
+- Returns `false` if the lock cannot be acquired within `lockTimeout`.
+- Atomic through the lock provider: per machine with `FileLockProvider`,
+  across servers with `RedisLockProvider`. Entries stay signed and are
+  readable with `get()`.
+
+```php
+$attempts = $cache->increment('login.' . sha1($ip), 1, 60); // 60 s window
+```
+
+---
+
+### add()
+
+```php
+public function add(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
+```
+
+Stores the value only if the key has no fresh entry (atomic, like
+`increment()`). `$ttl`: `null` = default TTL, `<= 0` = no expiry. Returns
+`true` when the value was stored.
 
 ---
 
@@ -285,9 +329,10 @@ $cache->invalidateTags('team-7');
 public function prune(): int
 ```
 
-**Returns:** Number of removed entries. `FileStorage` and `PdoStorage` delete
-expired entries (FileStorage also removes files in an unknown format and
-orphaned temp files); APCu and Redis expire entries on their own.
+**Returns:** Number of removed entries, from the tiers that implement
+`PrunableStorageInterface`. `FileStorage` and `PdoStorage` delete expired
+entries (FileStorage also removes files in an unknown format and orphaned
+temp files); APCu and Redis expire entries on their own.
 
 ---
 
@@ -309,13 +354,60 @@ Counters of this instance:
 
 ---
 
+## CacheBuilder
+
+Fluent alternative to the constructor, returned by `MultiTierCache::builder()`:
+
+```php
+$cache = MultiTierCache::builder()
+    ->tier(new ApcuStorage('app:', maxTtl: 60))   // add tiers fastest first
+    ->tiers($redisStorage, $fileStorage)          // or several at once
+    ->serializer(new NativeSerializer([UserDto::class]))
+    ->compressor(new GzipCompressor(3))
+    ->signingKey($_ENV['EASYCACHE_SIGNING_KEY'])
+    ->defaultTtl(600)
+    ->logger($logger)
+    ->clock($clock)
+    ->lockProvider(new RedisLockProvider($redis))  // or ->lockPath('/var/lib/app/locks')
+    ->lockTimeout(10.0)
+    ->allowUnsignedObjects(false)
+    ->build();
+```
+
+`build()` throws `\InvalidArgumentException` without tiers and applies the same
+checks as the constructor.
+
+---
+
 ## TaggedCache
 
 A PSR-16 view returned by `MultiTierCache::tags()`. It supports `get`, `set`,
 `delete`, `has`, `getMultiple`, `setMultiple`, `deleteMultiple`,
-`getOrSetSWR`, `remember` and `forever`. `clear()` invalidates the view's tags.
+`getOrSetSWR`, `remember`, `forever`, `increment`, `decrement` and `add`.
+The tag versions are read once per operation (also for the `*Multiple()`
+methods). `clear()` invalidates the view's tags.
 Entries must be read with the same set of tags they were written with (the
 order does not matter). Keys may be up to 217 bytes.
+
+---
+
+## PSR-6 Adapter
+
+`Iprodev\EasyCache\Psr6\CacheItemPool` implements `Psr\Cache\CacheItemPoolInterface`
+on top of a `MultiTierCache` (requires `psr/cache` ^3).
+
+```php
+public function __construct(MultiTierCache $cache, ?ClockInterface $clock = null)
+```
+
+- Pass the cache's clock if you gave it one, so expiries are computed the same way.
+- `getItem()`, `getItems()`, `hasItem()`, `save()`, `deleteItem(s)()` and `clear()` map to the cache.
+- `CacheItem::expiresAfter()` / `expiresAt()` set the TTL; without one the cache's default TTL is used.
+  Saving an already expired item deletes the key.
+- `saveDeferred()` items are visible to `getItem()` immediately and written by
+  `commit()` (one `setMultiple()` per expiry), at the latest when the pool is destroyed.
+- Invalid keys throw `Iprodev\EasyCache\Psr6\InvalidArgument`
+  (a `Psr\Cache\InvalidArgumentException`).
 
 ---
 
@@ -331,20 +423,20 @@ interface StorageInterface
     public function delete(string $key): bool;          // true also when the key did not exist
     public function has(string $key): bool;
     public function clear(): bool;                      // only this storage's entries
-    public function prune(): int;                       // number of removed entries
+    public function getMany(array $keys): array;        // found payloads indexed by key
+    public function setMany(array $payloads, int $ttl): bool;
+    public function deleteMany(array $keys): bool;
 }
 ```
 
-### BatchStorageInterface
+### PrunableStorageInterface
 
-Optional, implemented by all built-in storages:
+For backends that do not expire entries on their own (`FileStorage`, `PdoStorage`):
 
 ```php
-interface BatchStorageInterface extends StorageInterface
+interface PrunableStorageInterface extends StorageInterface
 {
-    public function getMany(array $keys): array;              // found payloads indexed by key
-    public function setMany(array $payloads, int $ttl): bool;
-    public function deleteMany(array $keys): bool;
+    public function prune(): int; // number of removed entries
 }
 ```
 
@@ -412,7 +504,7 @@ public function __construct(object $redisClient, string $prefix = 'ec:', ?Logger
 **Notes:**
 - `SETEX` for TTLs, `MGET` for batch reads, pipelines for batch writes
 - `clear()` uses non-blocking `SCAN` with the escaped prefix (also for Predis) and handles client-level prefixes (`Redis::OPT_PREFIX`, Predis `prefix` option)
-- `prune()` returns 0 (Redis expires keys itself)
+- Redis expires keys itself, so `RedisStorage` is not prunable
 
 ---
 
@@ -489,7 +581,9 @@ a blocking `acquire()` waits at most the TTL.
 
 Disables locking (every lock is acquired immediately).
 
-### Util\Lock
+### FileLock
+
+`Iprodev\EasyCache\Lock\FileLock` (named `Util\Lock` before 4.0):
 
 ```php
 public function __construct(string $path, bool $removeOnRelease = true)
@@ -514,22 +608,29 @@ interface SerializerInterface
     public function serialize(mixed $value): string;
     public function deserialize(string $payload): mixed; // must throw on invalid input
     public function name(): string;                      // 1-255 bytes, stored with each entry
+    public function allowsObjects(): bool;               // can deserialize() create objects?
 }
 ```
+
+Serializers whose `allowsObjects()` returns `true` require a signing key (or
+`allowUnsignedObjects: true`) on `MultiTierCache`.
 
 ### NativeSerializer
 
 ```php
-public function __construct(bool|array $allowedClasses = true, int $maxDepth = 0)
+public function __construct(bool|array $allowedClasses = false, int $maxDepth = 0)
 ```
 
-- `$allowedClasses`: `true` (any class), `false` (no objects) or a list of class names. Other classes become `__PHP_Incomplete_Class`
+- `$allowedClasses`: `false` (default: no objects, only scalars and arrays), a list of class names, or `true` (any class)
+- Writing an object of a class that is not allowed throws `\InvalidArgumentException` (`set()` returns `false` and logs it)
+- Reading an entry that contains an object of a class that is not allowed throws `\UnexpectedValueException` (a cache miss)
+- `allowsObjects()` is `true` unless `$allowedClasses` is `false` (or an empty list)
 - `$maxDepth`: Maximum nesting depth (0 = PHP default)
 - Throws `\UnexpectedValueException` for invalid payloads (a stored `false` is still returned as `false`)
 - Name: `php`
 
-> Unserializing attacker-controlled data can execute code. Restrict
-> `$allowedClasses` and/or use a signing key.
+> Unserializing attacker-controlled objects can execute code, which is why
+> object support requires a signing key.
 
 ### JsonSerializer
 
@@ -537,7 +638,7 @@ public function __construct(bool|array $allowedClasses = true, int $maxDepth = 0
 public function __construct(int $depth = 512)
 ```
 
-- Never creates objects: objects come back as associative arrays
+- Never creates objects: objects come back as associative arrays (`allowsObjects()` is `false`)
 - Floats keep their type (`1.0` stays a float)
 - Throws `\JsonException` on invalid data
 - Name: `json`
@@ -647,6 +748,24 @@ EasyCache::remember('stats', 300, fn () => $this->computeStats());
 
 The facade exposes every public `MultiTierCache` method.
 
+### Cache store driver
+
+The provider registers an `easycache` driver and a matching
+`cache.stores.easycache` store (unless you define one yourself), so
+`Cache::store('easycache')` works out of the box; set `CACHE_STORE=easycache`
+to make it the default.
+
+`Iprodev\EasyCache\Laravel\EasyCacheStore` implements Laravel's `Store`
+(`TaggableStore`) and `LockProvider`:
+
+- `get`, `many`, `put`, `putMany`, `add` (atomic), `increment`/`decrement`
+  (atomic; new counters do not expire), `forever`, `touch`, `forget`, `flush`
+- Laravel tags (`Cache::store('easycache')->tags([...])`)
+- Atomic locks (`Cache::store('easycache')->lock($name, $seconds)`), based on `add()`
+- Keys: the store prefix (`prefix` option, default `cache.prefix`) is
+  prepended; characters that EasyCache keys do not allow, and `%`, are
+  percent-encoded (one-to-one); keys longer than 255 bytes are hashed
+
 ### Artisan commands
 
 ```bash
@@ -667,6 +786,7 @@ return [
     'default_ttl' => 600,
     'sign' => true,                     // sign entries...
     'signing_key' => null,              // ...with this key, or one derived from APP_KEY
+    'allow_unsigned_objects' => false,  // required to cache objects with 'sign' => false
     'lock' => ['driver' => 'file', 'path' => storage_path('framework/cache/easycache-locks'), 'timeout' => 30],
     'apcu' => ['prefix' => 'ec:', 'max_ttl' => 60],
     'redis' => ['client' => 'phpredis', 'host' => '127.0.0.1', 'port' => 6379, 'prefix' => 'ec:'],

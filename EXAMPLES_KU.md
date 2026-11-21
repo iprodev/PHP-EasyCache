@@ -196,8 +196,9 @@ $user->email = 'ahmad@example.com';
 
 $cache = new MultiTierCache(
     [$storage],
-    new NativeSerializer(),
-    new GzipCompressor(5)
+    new NativeSerializer([User::class]),          // ئەو پۆلانەی دەتوانرێت وەک ئۆبجێکت cache بکرێن
+    new GzipCompressor(5),
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY']   // کاتێک ئۆبجێکت ڕێگەپێدراوە پێویستە
 );
 
 $cache->set('user_object', $user, 3600);
@@ -276,7 +277,7 @@ $data = $cache->getOrSetSWR(
     ttl: 300,
     swrSeconds: 120,
     staleIfErrorSeconds: 1800,
-    options: ['mode' => 'defer']
+    mode: RefreshMode::Defer
 );
 ```
 
@@ -296,7 +297,7 @@ function getWeatherData($city, $cache) {
         ttl: 1800,      // 30 خولەک تازە
         swrSeconds: 300, // 5 خولەک stale
         staleIfErrorSeconds: 3600,  // 1 کاتژمێر ئەگەر API down بێت
-        options: ['mode' => 'defer']
+        mode: RefreshMode::Defer
     );
 }
 
@@ -326,7 +327,7 @@ function getPopularProducts(PDO $db, MultiTierCache $cache): array {
         ttl: 900,       // 15 خولەک
         swrSeconds: 180, // 3 خولەک
         staleIfErrorSeconds: 3600,
-        options: ['mode' => 'defer']
+        mode: RefreshMode::Defer
     );
 }
 ```
@@ -409,7 +410,7 @@ class DashboardController extends Controller
             'dashboard_stats',
             fn() => $this->loadStats(),
             300, 60, 600,
-            ['mode' => 'defer']
+            RefreshMode::Defer
         );
 
         return view('dashboard', compact('stats'));
@@ -522,16 +523,10 @@ class RateLimiter
 
     public function hit(string $key): int
     {
-        $attempts = $this->cache->get($key, 0);
-        $attempts++;
-        
-        $this->cache->set(
-            $key,
-            $attempts,
-            $this->decayMinutes * 60
-        );
+        // increment() ئەتۆمییە؛ پەنجەرەی کات بە یەکەم داواکاری دەست پێدەکات
+        $attempts = $this->cache->increment($key, 1, $this->decayMinutes * 60);
 
-        return $attempts;
+        return $attempts === false ? PHP_INT_MAX : $attempts;
     }
 
     public function remaining(string $key): int
@@ -558,7 +553,7 @@ $limiter->hit($key);
 // بەردەوامبوونی داواکاری...
 ```
 
-> ⚠️ ئەم نموونەیە ئەتۆمی نییە (get و set جیان) و بۆ سنووری نزیکەیی گونجاوە. بۆ سنووری ورد `INCR` ی Redis بەکاربهێنە.
+> بۆ ژماردنی ئەتۆمی `$cache->increment($key, 1, $ttl)` بەکاربهێنە: بە قفڵی فایل لە یەک ڕاژەکاردا و بە `RedisLockProvider` لە نێوان چەند ڕاژەکاردا ئەتۆمییە.
 
 ### Session Management
 

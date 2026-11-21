@@ -16,8 +16,8 @@ use Iprodev\EasyCache\Exceptions\InvalidArgument;
  */
 final class KeyValidator
 {
-    public const MAX_LENGTH = 255;
-    public const RESERVED_CHARACTERS = '{}()/\\@:';
+    public const int MAX_LENGTH = 255;
+    public const string RESERVED_CHARACTERS = '{}()/\\@:';
 
     /**
      * @throws InvalidArgument

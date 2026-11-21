@@ -30,7 +30,22 @@ interface StorageInterface
     public function clear(): bool;
 
     /**
-     * Remove expired entries. Returns the number of removed entries.
+     * Read several keys, ideally in one round trip.
+     *
+     * @param list<string> $keys
+     * @return array<string, string> Found payloads indexed by key (missing keys are omitted)
      */
-    public function prune(): int;
+    public function getMany(array $keys): array;
+
+    /**
+     * Store several payloads with the same TTL, ideally in one round trip.
+     *
+     * @param array<string, string> $payloads Payloads indexed by key
+     */
+    public function setMany(array $payloads, int $ttl): bool;
+
+    /**
+     * @param list<string> $keys
+     */
+    public function deleteMany(array $keys): bool;
 }

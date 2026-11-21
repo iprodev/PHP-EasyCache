@@ -33,7 +33,7 @@ class SerializerTest extends TestCase
 
     public function testNativeSerializerWithObject(): void
     {
-        $serializer = new NativeSerializer();
+        $serializer = new NativeSerializer([\stdClass::class]);
 
         $data = (object)['prop1' => 'value1', 'prop2' => 42];
         $serialized = $serializer->serialize($data);
@@ -107,16 +107,61 @@ class SerializerTest extends TestCase
         (new NativeSerializer())->deserialize('{"not":"php"}');
     }
 
-    public function testNativeSerializerAllowedClasses(): void
+    public function testNativeSerializerRejectsObjectsByDefault(): void
+    {
+        $serializer = new NativeSerializer();
+        $this->assertFalse($serializer->allowsObjects());
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('ArrayObject');
+        $serializer->serialize(['nested' => [new \ArrayObject([1])]]);
+    }
+
+    public function testNativeSerializerRejectsNestedObjectsOfOtherClasses(): void
+    {
+        $serializer = new NativeSerializer([\stdClass::class]);
+        $this->assertTrue($serializer->allowsObjects());
+
+        $this->assertIsString($serializer->serialize((object) ['a' => 1]));
+
+        $outer = new \stdClass();
+        $outer->inner = new \SplStack(); // a forbidden class nested in an allowed one
+        $this->expectException(\InvalidArgumentException::class);
+        $serializer->serialize($outer);
+    }
+
+    public function testNativeSerializerTreatsForbiddenObjectsAsInvalidWhenReading(): void
     {
         $payload = serialize([new \ArrayObject([1]), new \SplStack()]);
 
-        $none = (new NativeSerializer(false))->deserialize($payload);
-        $this->assertInstanceOf(\__PHP_Incomplete_Class::class, $none[0]);
+        try {
+            (new NativeSerializer(false))->deserialize($payload);
+            $this->fail('objects must be refused');
+        } catch (\UnexpectedValueException) {
+            $this->addToAssertionCount(1);
+        }
 
-        $some = (new NativeSerializer([\ArrayObject::class]))->deserialize($payload);
-        $this->assertInstanceOf(\ArrayObject::class, $some[0]);
-        $this->assertInstanceOf(\__PHP_Incomplete_Class::class, $some[1]);
+        try {
+            (new NativeSerializer([\ArrayObject::class]))->deserialize($payload);
+            $this->fail('SplStack is not allowed');
+        } catch (\UnexpectedValueException) {
+            $this->addToAssertionCount(1);
+        }
+
+        $value = (new NativeSerializer(true))->deserialize($payload);
+        $this->assertInstanceOf(\SplStack::class, $value[1]);
+    }
+
+    public function testNativeSerializerAllowsScalarsAndArraysByDefault(): void
+    {
+        $serializer = new NativeSerializer();
+        $data = ['a' => [1, 2.5, true, null, 'x']];
+        $this->assertSame($data, $serializer->deserialize($serializer->serialize($data)));
+    }
+
+    public function testJsonSerializerNeverAllowsObjects(): void
+    {
+        $this->assertFalse((new JsonSerializer())->allowsObjects());
     }
 
     public function testNativeSerializerMaxDepth(): void

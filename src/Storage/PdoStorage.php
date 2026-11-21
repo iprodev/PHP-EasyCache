@@ -22,13 +22,13 @@ use Throwable;
  * The PDO connection is used as-is: its error mode is not changed, both
  * exception and silent error modes are handled.
  */
-final class PdoStorage implements BatchStorageInterface, LoggerAwareInterface
+final class PdoStorage implements PrunableStorageInterface, LoggerAwareInterface
 {
     use LogsErrors;
 
     /** Keys longer than this are stored as a hash, so they fit the key column. */
-    private const MAX_KEY_LENGTH = 64;
-    private const CHUNK_SIZE = 500;
+    private const int MAX_KEY_LENGTH = 64;
+    private const int CHUNK_SIZE = 500;
 
     private PDO $pdo;
     private string $table;
@@ -49,7 +49,8 @@ final class PdoStorage implements BatchStorageInterface, LoggerAwareInterface
 
         $this->pdo = $pdo;
         $this->table = $table;
-        $this->driver = (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        $driver = $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        $this->driver = is_string($driver) ? $driver : '';
         $this->clock = $clock ?? new SystemClock();
         $this->logger = $logger;
     }
@@ -148,7 +149,7 @@ final class PdoStorage implements BatchStorageInterface, LoggerAwareInterface
                 return null;
             }
 
-            $expiresAt = (int) $row['expires_at'];
+            $expiresAt = self::toInt($row['expires_at'] ?? 0);
             if ($expiresAt > 0 && $expiresAt <= $this->now()) {
                 $this->deleteIfExpired($key);
                 return null;
@@ -229,7 +230,7 @@ final class PdoStorage implements BatchStorageInterface, LoggerAwareInterface
                         break;
                     }
                     $storageKey = $this->readPayload($row['k']);
-                    $expiresAt = (int) $row['expires_at'];
+                    $expiresAt = self::toInt($row['expires_at'] ?? 0);
                     if ($storageKey === null || !isset($map[$storageKey]) || ($expiresAt > 0 && $expiresAt <= $now)) {
                         continue;
                     }
@@ -410,11 +411,23 @@ final class PdoStorage implements BatchStorageInterface, LoggerAwareInterface
     }
 
     /**
-     * @param array<int, mixed> $info
+     * @param array<mixed> $info
      */
     private function errorMessage(array $info): string
     {
-        return trim(implode(' ', array_map('strval', array_filter($info, static fn ($v) => $v !== null))));
+        $parts = [];
+        foreach ($info as $part) {
+            if (is_scalar($part)) {
+                $parts[] = (string) $part;
+            }
+        }
+
+        return trim(implode(' ', $parts));
+    }
+
+    private static function toInt(mixed $value): int
+    {
+        return is_int($value) ? $value : (is_numeric($value) ? (int) $value : 0);
     }
 
     private function readPayload(mixed $value): ?string

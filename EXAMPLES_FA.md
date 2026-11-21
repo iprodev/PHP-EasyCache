@@ -196,8 +196,9 @@ $user->email = 'ali@example.com';
 
 $cache = new MultiTierCache(
     [$storage],
-    new NativeSerializer(),
-    new GzipCompressor(5)
+    new NativeSerializer([User::class]),          // کلاس‌هایی که می‌توانند به‌صورت شیء کش شوند
+    new GzipCompressor(5),
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY']   // وقتی شیء مجاز است لازم است
 );
 
 $cache->set('user_object', $user, 3600);
@@ -276,7 +277,7 @@ $data = $cache->getOrSetSWR(
     ttl: 300,
     swrSeconds: 120,
     staleIfErrorSeconds: 1800,
-    options: ['mode' => 'defer']
+    mode: RefreshMode::Defer
 );
 ```
 
@@ -296,7 +297,7 @@ function getWeatherData($city, $cache) {
         ttl: 1800,      // 30 دقیقه تازه
         swrSeconds: 300, // 5 دقیقه stale
         staleIfErrorSeconds: 3600,  // 1 ساعت اگر API down باشد
-        options: ['mode' => 'defer']
+        mode: RefreshMode::Defer
     );
 }
 
@@ -326,7 +327,7 @@ function getPopularProducts(PDO $db, MultiTierCache $cache): array {
         ttl: 900,       // 15 دقیقه
         swrSeconds: 180, // 3 دقیقه
         staleIfErrorSeconds: 3600,
-        options: ['mode' => 'defer']
+        mode: RefreshMode::Defer
     );
 }
 ```
@@ -409,7 +410,7 @@ class DashboardController extends Controller
             'dashboard_stats',
             fn() => $this->loadStats(),
             300, 60, 600,
-            ['mode' => 'defer']
+            RefreshMode::Defer
         );
 
         return view('dashboard', compact('stats'));
@@ -522,16 +523,10 @@ class RateLimiter
 
     public function hit(string $key): int
     {
-        $attempts = $this->cache->get($key, 0);
-        $attempts++;
-        
-        $this->cache->set(
-            $key,
-            $attempts,
-            $this->decayMinutes * 60
-        );
+        // increment() اتمیک است؛ پنجرهٔ زمانی با اولین درخواست شروع می‌شود
+        $attempts = $this->cache->increment($key, 1, $this->decayMinutes * 60);
 
-        return $attempts;
+        return $attempts === false ? PHP_INT_MAX : $attempts;
     }
 
     public function remaining(string $key): int
@@ -558,7 +553,7 @@ $limiter->hit($key);
 // ادامه درخواست...
 ```
 
-> ⚠️ این مثال اتمیک نیست (get و set جدا هستند) و برای محدودیت تقریبی مناسب است. برای محدودیت دقیق از `INCR` در Redis استفاده کنید.
+> برای شمارش اتمیک از `$cache->increment($key, 1, $ttl)` استفاده کنید: با قفل فایلی در یک سرور و با `RedisLockProvider` بین چند سرور اتمیک است.
 
 ### Session Management
 

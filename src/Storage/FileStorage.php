@@ -19,14 +19,14 @@ use RuntimeException;
  * File layout: "ECF1" + 8 byte big-endian expiry timestamp (0 = never) + payload.
  * The expiry header lets get() ignore and prune() delete expired files.
  */
-final class FileStorage implements BatchStorageInterface, LoggerAwareInterface
+final class FileStorage implements PrunableStorageInterface, LoggerAwareInterface
 {
     use LogsErrors;
 
-    private const MAGIC = 'ECF1';
-    private const HEADER_LENGTH = 12;
+    private const string MAGIC = 'ECF1';
+    private const int HEADER_LENGTH = 12;
     /** Temp files older than this are considered orphaned by prune(). */
-    private const ORPHAN_TMP_AGE = 3600;
+    private const int ORPHAN_TMP_AGE = 3600;
 
     private string $path;
     private string $ext;

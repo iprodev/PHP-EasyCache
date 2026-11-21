@@ -2,9 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Iprodev\EasyCache\Util;
-
-use Iprodev\EasyCache\Lock\LockInterface;
+namespace Iprodev\EasyCache\Lock;
 
 /**
  * Exclusive lock based on flock().
@@ -15,9 +13,9 @@ use Iprodev\EasyCache\Lock\LockInterface;
  *   acquisition, verifies that the locked file is still the one at the path,
  *   so lock files do not pile up and removing them is race free.
  */
-final class Lock implements LockInterface
+final class FileLock implements LockInterface
 {
-    private const MAX_RETRIES = 100;
+    private const int MAX_RETRIES = 100;
 
     private string $path;
     private bool $removeOnRelease;

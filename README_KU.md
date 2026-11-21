@@ -1,19 +1,21 @@
-# 🚀 PHP EasyCache v3 — کتێبخانەی Cache چەند ڕیزە لەگەڵ SWR
+# 🚀 PHP EasyCache v4 — کتێبخانەی Cache چەند ڕیزە لەگەڵ SWR
 
 **EasyCache** کتێبخانەیەکی پیشەیی و تەواوە بۆ cache کردن کە ستانداردی **PSR-16** جێبەجێ دەکات و تایبەتمەندییە پێشکەوتووەکانی خوارەوەی هەیە:
 
 - 🚀 هەڵگرتنی چەند ڕیزە: **APCu، Redis، File و PDO (MySQL/PostgreSQL/SQLite)**
 - 🔒 **نووسینی ئەتۆمی** بۆ file storage و **ڕێگری لە cache stampede** بە قفڵی تایبەت بە هەر کلیلێک (فایل یان Redis)
 - ⚡ **SWR تەواو** (*stale-while-revalidate* + *stale-if-error*)
-- 🛡️ **تۆماری دژە-دەستکاری**: واژۆی ئارەزوومەندانەی HMAC-SHA256 و بەکارنەهێنانی `unserialize()` بۆ سەردێڕی تۆمارەکان
+- 🛡️ **سەلامەت بە بنەڕەت**: هیچ ئۆبجێکتێک unserialize ناکرێت مەگەر خۆت ڕێگە بدەیت، و ئەویش تەنها لە تۆماری واژۆکراو بە HMAC
 - 🔧 **Serializer و Compressor گۆڕاو** (PHP/JSON + هیچ/Gzip/Zstd یان هی خۆت)
 - 🔄 **Backfill خۆکار** لە نێوان ڕیزەکان
 - 📦 **کارپێکردنی کۆمەڵ** (`MGET`، `IN (...)`، `apcu_fetch([...])`)، **tag**، `remember()`، `forever()` و ئامار
+- 🔢 **ژمێرەری ئەتۆمی** (`increment()` و `decrement()`) و `add()`
+- 🧩 **ئەداپتەری PSR-6** و **cache store ی Laravel** (`Cache::store('easycache')`، tag، قفڵ و rate limiting)
 - 🎯 یەکخستنی تەواو لەگەڵ **Laravel**: Service Provider، Facade و فەرمانەکانی artisan
 - ✅ تاقیکراوەتەوە لەسەر File، SQLite، MySQL، PostgreSQL، Redis (phpredis و Predis) و APCu
 
-> وەشان: **v3.1.0** — پێویستی بە **PHP 8.1+** و `psr/simple-cache` ی `^2 || ^3` هەیە
-> لە 3.0 بەرز دەکەیتەوە؟ [MIGRATION.md](MIGRATION.md) بخوێنەوە.
+> وەشان: **v4.0.0** (لە گەشەپێداندا) — پێویستی بە **PHP 8.3+** و `psr/simple-cache` ی `^3` هەیە
+> لە 3.x بەرز دەکەیتەوە؟ [MIGRATION.md](MIGRATION.md) بخوێنەوە.
 
 ---
 
@@ -102,30 +104,49 @@ $result = $cache->getOrSetSWR(
     ttl: 300,                  // 5 خولەک تازە
     swrSeconds: 120,           // 2 خولەک کۆن
     staleIfErrorSeconds: 600,  // 10 خولەک ئەگەر هەڵە ڕووبدات
-    options: ['mode' => 'defer']
+    mode: RefreshMode::Defer
 );
 ```
 
 **چۆن کار دەکات:**
 1. تۆماری **تازە** ← دەستبەجێ دەگەڕێتەوە.
 2. **بەسەرچوو، لەناو `swrSeconds`** ← یەک پرۆسە تۆمارەکە نوێ دەکاتەوە و ئەوانی تر بەبێ چاوەڕوانی بەهای کۆن وەردەگرن.
-   - `mode: 'sync'` (بنەڕەت): پرۆسەی نوێکەرەوە بەهای **نوێ** دەگەڕێنێتەوە.
-   - `mode: 'defer'`: بەهای کۆن دەگەڕێتەوە و نوێکردنەوە دوای ناردنی وەڵام ئەنجام دەدرێت (`fastcgi_finish_request()` یان LiteSpeed؛ ئەگەرنا وەک `sync`).
+   - `RefreshMode::Sync` (بنەڕەت): پرۆسەی نوێکەرەوە بەهای **نوێ** دەگەڕێنێتەوە.
+   - `RefreshMode::Defer`: بەهای کۆن دەگەڕێتەوە و نوێکردنەوە دوای ناردنی وەڵام ئەنجام دەدرێت (`fastcgi_finish_request()` یان LiteSpeed؛ ئەگەرنا وەک `Sync`).
+
+`RefreshMode` واتە `Iprodev\EasyCache\Cache\RefreshMode`.
 3. **بەسەرچوو، تەنها لەناو `staleIfErrorSeconds`** ← بەها دووبارە هەژمار دەکرێت و تەنها **ئەگەر producer هەڵە بدات** بەهای کۆن دەگەڕێتەوە.
 4. **بوونی نییە** ← لەژێر قفڵی تایبەت بەو کلیلە هەژمار دەکرێت تاکو داواکارییە هاوکاتەکان producer تەنها یەک جار جێبەجێ بکەن.
 
 TTL ی `null` واتە TTL ی بنەڕەت (`0` = هەرگیز بەسەرناچێت) و TTL ی بچووکتر یان یەکسان بە سفر واتە هەژمارکردن بەبێ cache. ئەنجامی `null` یش cache دەکرێت.
 
-### 3. سەلامەتی: تۆماری واژۆکراو
+### 3. سەلامەتی: بنەڕەتی سەلامەت و تۆماری واژۆکراو
 
-هەر کەسێک بتوانێت لە backend ی cache بنووسێت (Redis ی بێ وشەی نهێنی، بوخچەی cache ی هاوبەش، خشتەی هاوبەشی بنکەی دراوە...) ئەگەرنا دەتوانێت تۆماری ساختە دابنێت. EasyCache هەرگیز سەردێڕی تۆمارەکان بە `unserialize()` ناخوێنێتەوە و لەگەڵ کلیلی واژۆ، هەر تۆمارێک واژۆی HMAC-SHA256 ی هەیە: تۆماری بێ واژۆ یان دەستکاریکراو **پێش** deserialize کردن ڕەت دەکرێتەوە.
+هەر کەسێک بتوانێت لە backend ی cache بنووسێت (Redis ی بێ وشەی نهێنی، بوخچەی cache ی هاوبەش، خشتەی هاوبەشی بنکەی دراوە...) ئەگەرنا دەتوانێت تۆماری ساختە دابنێت، و unserialize کردنی ئۆبجێکتێکی ساختە دەتوانێت ببێتە هۆی جێبەجێکردنی کۆد. EasyCache 4 بە بنەڕەت سەلامەتە:
+
+- `NativeSerializer` تەنها بەهای سادە و array cache دەکات. ئۆبجێکتی پۆلێک کە ڕێگەت پێنەداوە لە کاتی نووسیندا ڕەت دەکرێتەوە و لە کاتی خوێندنەوەدا پشتگوێ دەخرێت.
+- بۆ cache کردنی ئۆبجێکت، پۆلەکانی لە `allowedClasses` دا ڕیز بکە. serializer ێک کە دەتوانێت ئۆبجێکت دروست بکات **پێویستی بە کلیلی واژۆ هەیە**: هەر تۆمارێک واژۆی HMAC-SHA256 ی هەیە و تۆماری بێ واژۆ یان دەستکاریکراو **پێش** deserialize کردن ڕەت دەکرێتەوە.
 
 ```php
 $cache = new MultiTierCache(
     [$redisStore],
-    new NativeSerializer(allowedClasses: [UserDto::class]), // یان false: هیچ ئۆبجێکتێک دروست ناکرێت
+    new NativeSerializer(allowedClasses: [UserDto::class]), // true = هەر پۆلێک
     signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],             // لایەنی کەم 16 بایتی هەڕەمەکی
 );
+```
+
+ئەگەر جگە لە بەرنامەکەت هیچ کەسێک نەتوانێت لە هیچ چینێکدا بنووسێت، دەتوانیت لە جیاتی کلیلی واژۆ `allowUnsignedObjects: true` بدەیت.
+
+دروستکردنی cache بە builder یش دەکرێت:
+
+```php
+$cache = MultiTierCache::builder()
+    ->tier(new ApcuStorage('app:', maxTtl: 60))
+    ->tier(new RedisStorage($redis, 'app:'))
+    ->serializer(new NativeSerializer([UserDto::class]))
+    ->signingKey($_ENV['EASYCACHE_SIGNING_KEY'])
+    ->defaultTtl(600)
+    ->build();
 ```
 
 ### 4. میتۆدە یارمەتیدەرەکان
@@ -143,16 +164,30 @@ $cache->invalidateTags('users');
 
 // ژمێرەری hit/miss ی ئەم نموونەیە
 $cache->getStats(); // ['hits' => .., 'misses' => .., 'hit_ratio' => 0.93, ...]
+
+// ژمێرەری ئەتۆمی: ژمێرەری نوێ بە ئەندازەی TTL ی دراو دەمێنێتەوە
+// (null = بنەڕەت، 0 = هەمیشە) و زیادکردنەکانی دواتر کاتی بەسەرچوون ناگۆڕن
+$attempts = $cache->increment('login-attempts.' . sha1($ip), 1, 60);
+$cache->decrement('stock.42');
+
+// هەڵگرتن تەنها ئەگەر بوونی نەبێت (ئەتۆمی)
+if ($cache->add('job.42.started', time(), 300)) {
+    // ئەم پرۆسەیە بردییەوە
+}
 ```
+
+`increment()`، `decrement()` و `add()` لە ڕێگەی lock provider ەوە ئەتۆمین: قفڵی فایل پرۆسەکانی یەک ئامێر ڕێکدەخات و `RedisLockProvider` هەموو ڕاژەکارەکان. ئەگەر قفڵ لە ماوەی lock timeout دا وەرنەگیرێت (یان بەهاکە ژمارەی تەواو نەبێت) `false` دەگەڕێننەوە.
 
 ### 5. Serializer و Compressor گۆڕاو
 
 ```php
-// Serializer ی نیشتیمانی PHP (پشتگیری لە objects؛ پۆلە ڕێگەپێدراوەکان سنووردار بکە)
+// Serializer ی نیشتیمانی PHP: بە بنەڕەت تەنها بەهای سادە و array؛
+// ئۆبجێکت تەنها بۆ پۆلە ڕیزکراوەکان و لەگەڵ کلیلی واژۆ
 $cache = new MultiTierCache(
     [$storage],
-    new NativeSerializer(allowedClasses: true),
-    new GzipCompressor(5)
+    new NativeSerializer([Money::class]),
+    new GzipCompressor(5),
+    signingKey: $key
 );
 
 // Serializer ی JSON (هەرگیز ئۆبجێکت دروست ناکات؛ ئۆبجێکتەکان دەبنە array)
@@ -248,7 +283,7 @@ $posts = $cache->getOrSetSWR(
     ttl: 300,          // 5 خولەک تازە
     swrSeconds: 60,    // 1 خولەک کۆن
     staleIfErrorSeconds: 300,
-    options: ['mode' => 'defer']
+    mode: RefreshMode::Defer
 );
 ```
 
@@ -287,7 +322,7 @@ EASYCACHE_LOCK_DRIVER=redis         # file|redis|none
 EASYCACHE_COMPRESSOR=gzip           # none|gzip|zstd
 ```
 
-- تۆمارەکان بە بنەڕەت بە کلیلێک کە لە `APP_KEY` وەرگیراوە **واژۆ** دەکرێن (`EASYCACHE_SIGNING_KEY` بۆ کلیلی خۆت، `EASYCACHE_SIGN=false` بۆ ناچالاککردن).
+- تۆمارەکان بە بنەڕەت بە کلیلێک کە لە `APP_KEY` وەرگیراوە **واژۆ** دەکرێن (`EASYCACHE_SIGNING_KEY` بۆ کلیلی خۆت، `EASYCACHE_SIGN=false` بۆ ناچالاککردن). لەگەڵ واژۆی ناچالاک، cache کردنی ئۆبجێکت تەنها بە `EASYCACHE_ALLOW_UNSIGNED_OBJECTS=true` یان `serializer.allowed_classes = false` دەکرێت.
 - درایڤەرێک کە دەست پێنەکات (پاشکۆی نەبوو، Redis ی کوژاوە...) بە warning ێک لە log دا تێدەپەڕێنرێت.
 - cache لە ڕێگەی `app('easycache')`، Facade یان type-hint کردنی `MultiTierCache` بەردەستە.
 
@@ -308,11 +343,45 @@ $data = EasyCache::getOrSetSWR(
 );
 ```
 
+### Cache store ی Laravel
+
+Service provider درایڤەرێکی cache بە ناوی `easycache` تۆمار دەکات، بۆیە EasyCache لەگەڵ API ی خودی Laravel، tag ەکان، قفڵی ئەتۆمی و rate limiter کار دەکات:
+
+```php
+Cache::store('easycache')->remember('users', 600, fn () => User::all());
+Cache::store('easycache')->tags(['users'])->flush();
+Cache::store('easycache')->lock('reports', 30)->get(fn () => $this->buildReports());
+```
+
+ئەم store ە بەبێ ڕێکخستن بەردەستە. بۆ ئەوەی store ی بنەڕەت بێت `CACHE_STORE=easycache` دابنێ. کلیلەکانی Laravel دەتوانن هەر پیتێکیان تێدابێت؛ ئەو پیتانەی لە کلیلی EasyCache دا ڕێگەپێنەدراون کۆد دەکرێن.
+
 ### فەرمانەکانی Artisan
 
 ```bash
 php artisan easycache:prune   # سڕینەوەی تۆمارە بەسەرچووەکان
 php artisan easycache:clear   # سڕینەوەی هەموو تۆمارەکان
+```
+
+---
+
+## 🧩 PSR-6
+
+بۆ ئەو کتێبخانانەی pool ی PSR-6 یان دەوێت (`composer require psr/cache`):
+
+```php
+use Iprodev\EasyCache\Psr6\CacheItemPool;
+
+$pool = new CacheItemPool($cache);
+
+$item = $pool->getItem('user-42');
+if (!$item->isHit()) {
+    $item->set($repo->find(42))->expiresAfter(600);
+    $pool->save($item);
+}
+
+// هەڵگرتنە deferred ەکان بە یەک کۆمەڵ بۆ هەر کاتێکی بەسەرچوون دەنووسرێن
+$pool->saveDeferred($pool->getItem('a')->set(1));
+$pool->commit();
 ```
 
 ---
@@ -432,7 +501,7 @@ $data = $cache->getOrSetSWR(
     'expensive_query',
     fn() => expensiveOperation(),
     300, 60, 600,
-    ['mode' => 'defer']  // وەڵامی خێراتر
+    RefreshMode::Defer  // وەڵامی خێراتر
 );
 ```
 
@@ -599,7 +668,7 @@ $posts = $cache->getOrSetSWR(
     ttl: 600,                  // 10 خولەک تازە
     swrSeconds: 120,           // 2 خولەک کۆن
     staleIfErrorSeconds: 1800, // 30 خولەک ئەگەر هەڵە
-    options: ['mode' => 'defer']
+    mode: RefreshMode::Defer
 );
 
 foreach ($posts as $post) {

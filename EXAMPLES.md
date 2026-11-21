@@ -27,9 +27,10 @@ use Iprodev\EasyCache\Serialization\NativeSerializer;
 use Iprodev\EasyCache\Compression\NullCompressor;
 
 $cache = new MultiTierCache(
-    [new FileStorage('/tmp/cache')],
-    new NativeSerializer(),
-    new NullCompressor()
+    [new FileStorage('/var/cache/myapp')],
+    new NativeSerializer([stdClass::class]),     // classes that may be cached as objects
+    new NullCompressor(),
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],  // required when objects are allowed
 );
 
 // Store a string
@@ -89,7 +90,7 @@ class WeatherService
             ttl: 300,                    // Fresh for 5 minutes
             swrSeconds: 60,              // Serve stale for 1 minute while refreshing
             staleIfErrorSeconds: 3600,   // If API is down, serve stale for 1 hour
-            options: ['mode' => 'defer'] // Refresh after response
+            mode: RefreshMode::Defer // Refresh after response
         );
     }
 }
@@ -403,16 +404,11 @@ class RateLimiter
 
     public function attempt(string $key, int $maxAttempts, int $decay): bool
     {
-        // Hash the identifier: IPv6 addresses contain ':' which is not allowed in keys
-        $cacheKey = 'rate_limit_' . sha1($key);
-        $attempts = $this->cache->get($cacheKey) ?? 0;
+        // Hash the identifier: IPv6 addresses contain ':' which is not allowed in keys.
+        // increment() is atomic; the window starts with the first hit and is not extended.
+        $attempts = $this->cache->increment('rate_limit_' . sha1($key), 1, $decay);
 
-        if ($attempts >= $maxAttempts) {
-            return false;
-        }
-
-        $this->cache->set($cacheKey, $attempts + 1, $decay);
-        return true;
+        return $attempts !== false && $attempts <= $maxAttempts;
     }
 
     public function remaining(string $key, int $maxAttempts): int
@@ -440,8 +436,8 @@ if (!$limiter->attempt($ip, 100, 3600)) {
 // Process request...
 ```
 
-> ⚠️ `get()` + `set()` is not atomic, so this limiter is approximate under
-> heavy concurrency. Use Redis `INCR`/`EXPIRE` directly when limits must be exact.
+`increment()` is atomic through the cache's lock provider: per machine with
+file locks, across servers with `RedisLockProvider`.
 
 ### API Token Rate Limiting
 
