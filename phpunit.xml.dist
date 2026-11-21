@@ -10,10 +10,16 @@
          displayDetailsOnTestsThatTriggerWarnings="true"
          displayDetailsOnTestsThatTriggerDeprecations="true"
          failOnRisky="true"
-         failOnWarning="true">
+         failOnWarning="true"
+         defaultTestSuite="default">
     <testsuites>
-        <testsuite name="EasyCache Test Suite">
+        <testsuite name="default">
             <directory>tests</directory>
+            <exclude>tests/Laravel</exclude>
+        </testsuite>
+        <!-- Requires orchestra/testbench: composer test:laravel -->
+        <testsuite name="laravel">
+            <directory>tests/Laravel</directory>
         </testsuite>
     </testsuites>
 

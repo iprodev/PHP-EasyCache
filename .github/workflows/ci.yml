@@ -29,7 +29,7 @@ jobs:
       - name: PHP_CodeSniffer (PSR-12)
         run: composer cs
 
-      - name: PHPStan (level 8, incl. Laravel integration via Larastan)
+      - name: PHPStan (level 8)
         run: composer stan
 
       - name: Composer audit (runtime dependencies)
@@ -69,7 +69,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 30
 
     env:
@@ -108,6 +108,35 @@ jobs:
         with:
           name: coverage
           path: coverage.xml
+
+  laravel:
+    name: Laravel integration (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: redis, pdo_sqlite
+          coverage: none
+
+      # Laravel is not a dependency of the library; supported Laravel versions
+      # without known advisories are installed for this job only.
+      - name: Add Laravel test tooling
+        run: composer require --dev --no-update "orchestra/testbench:^10.0 || ^11.0" "larastan/larastan:^3.0"
+
+      - uses: ramsey/composer-install@v3
+
+      - name: PHPStan (Laravel integration, Larastan)
+        run: composer stan:laravel
+
+      - name: Run Laravel tests
+        run: composer test:laravel
 
   lowest:
     name: Tests (PHP 8.1, lowest dependencies)

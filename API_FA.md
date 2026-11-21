@@ -1,21 +1,26 @@
 # مرجع API
 
-مستندات کامل API برای PHP EasyCache v3.
+مستندات کامل API برای PHP EasyCache نسخهٔ 3.1.
 
 ## فهرست مطالب
 
 - [MultiTierCache](#multitiercache)
+- [TaggedCache](#taggedcache)
 - [Storage Backends](#storage-backends)
+- [قفل‌ها (Locks)](#قفلها-locks)
 - [Serializers](#serializers)
 - [Compressors](#compressors)
+- [ساعت‌ها (Clocks)](#ساعتها-clocks)
 - [ابزارها](#ابزارها)
 - [استثناها](#استثناها)
+- [یکپارچگی با Laravel](#یکپارچگی-با-laravel)
+- [قالب رکورد](#قالب-رکورد)
 
 ---
 
 ## MultiTierCache
 
-کلاس اصلی cache که رابط PSR-16 CacheInterface را پیاده‌سازی می‌کند.
+کلاس اصلی cache که رابط PSR-16 یعنی `CacheInterface` را پیاده‌سازی می‌کند.
 
 ### سازنده (Constructor)
 
@@ -26,30 +31,40 @@ public function __construct(
     ?CompressorInterface $compressor = null,
     int $defaultTtl = 3600,
     ?LoggerInterface $logger = null,
-    ?string $lockPath = null
+    ?string $lockPath = null,
+    ?ClockInterface $clock = null,
+    ?string $signingKey = null,
+    ?LockProviderInterface $lockProvider = null,
+    float $lockTimeout = 30.0
 )
 ```
 
 **پارامترها:**
-- `$tiers` (array): آرایه‌ای از نمونه‌های StorageInterface، مرتب شده از سریع‌ترین به کندترین
-- `$serializer` (SerializerInterface|null): نمونه Serializer (پیش‌فرض: NativeSerializer)
-- `$compressor` (CompressorInterface|null): نمونه Compressor (پیش‌فرض: NullCompressor)
-- `$defaultTtl` (int): TTL پیش‌فرض به ثانیه (پیش‌فرض: 3600)
-- `$logger` (LoggerInterface|null): نمونه logger سازگار با PSR-3
-- `$lockPath` (string|null): مسیر دایرکتوری برای فایل‌های قفل (پیش‌فرض: sys_get_temp_dir()/ec-locks)
+- `$tiers` (StorageInterface[]): لایه‌های ذخیره‌سازی، مرتب از سریع‌ترین به کندترین
+- `$serializer`: پیش‌فرض `NativeSerializer`
+- `$compressor`: پیش‌فرض `NullCompressor`
+- `$defaultTtl` (int): TTL پیش‌فرض به ثانیه وقتی TTL داده نشود. مقدار `0` یعنی بدون انقضا (پیش‌فرض: 3600)
+- `$logger`: logger سازگار با PSR-3. به هر لایه‌ای هم که `LoggerAwareInterface` را پیاده کرده و هنوز logger ندارد داده می‌شود
+- `$lockPath` (string|null): دایرکتوری فایل‌های قفل (پیش‌فرض: یک دایرکتوری خصوصی مخصوص همان کاربر در temp سیستم). اگر `$lockProvider` داده شود نادیده گرفته می‌شود
+- `$clock` (`Psr\Clock\ClockInterface`): منبع زمان (پیش‌فرض: `SystemClock`)
+- `$signingKey` (string|null): کلید مخفی با حداقل ۱۶ بایت. اگر تنظیم شود رکوردها با HMAC-SHA256 امضا می‌شوند و رکوردهای بدون امضا یا دستکاری‌شده **پیش از** deserialize شدن رد می‌شوند
+- `$lockProvider`: پیاده‌سازی قفل (پیش‌فرض: `FileLockProvider`)
+- `$lockTimeout` (float): حداکثر ثانیه‌های انتظار برای قفل در cache miss؛ بعد از آن مقدار بدون قفل محاسبه می‌شود (پیش‌فرض: 30)
 
-**استثنا:**
-- `\InvalidArgumentException` اگر `$tiers` خالی باشد
+**استثناها:**
+- `\InvalidArgumentException` اگر `$tiers` خالی باشد یا عضوی غیر از `StorageInterface` داشته باشد، کلید امضا کوتاه‌تر از ۱۶ بایت باشد، یا نام serializer/compressor خالی یا بیش از ۲۵۵ بایت باشد
+
+سازنده به فایل‌سیستم دست نمی‌زند: دایرکتوری قفل در اولین استفاده ساخته می‌شود.
 
 **مثال:**
 ```php
 $cache = new MultiTierCache(
-    [new ApcuStorage(), new FileStorage('/cache')],
-    new NativeSerializer(),
+    [new ApcuStorage('app:', maxTtl: 60), new FileStorage('/var/cache/app')],
+    new NativeSerializer(allowedClasses: [UserDto::class]),
     new GzipCompressor(5),
-    3600,
-    $logger,
-    '/var/lock/cache'
+    defaultTtl: 3600,
+    logger: $logger,
+    signingKey: $_ENV['EASYCACHE_SIGNING_KEY'],
 );
 ```
 
@@ -57,140 +72,86 @@ $cache = new MultiTierCache(
 
 ### ()get
 
-بازیابی یک آیتم از cache.
-
 ```php
 public function get(string $key, mixed $default = null): mixed
 ```
 
-**پارامترها:**
-- `$key` (string): کلید cache (حداکثر 64 کاراکتر، فقط حروف و اعداد + `_` `.`)
-- `$default` (mixed): مقدار پیش‌فرض اگر کلید وجود نداشته باشد
+- `$key`: کلید (قوانین در [KeyValidator](#keyvalidator))
+- `$default`: مقداری که در صورت miss برگردانده می‌شود
 
-**برمی‌گرداند:** مقدار cache شده یا `$default`
+**خروجی:** مقدار کش‌شده (که می‌تواند `null` یا `false` هم باشد) یا `$default`
 
-**استثنا:**
-- `InvalidArgument` اگر کلید نامعتبر باشد
+**استثنا:** `InvalidArgument` برای کلید نامعتبر
 
-**مثال:**
+لایه‌ها به ترتیب خوانده می‌شوند. نسخهٔ منقضی‌شده در یک لایهٔ سریع جستجو را متوقف نمی‌کند: ممکن است یک لایهٔ کندتر نسخهٔ تازه‌تری داشته باشد (که سرور دیگری نوشته). در این صورت آن نسخه در لایه‌های سریع‌تر هم نوشته می‌شود (backfill).
+
 ```php
-$value = $cache->get('user_123', ['name' => 'ناشناس']);
+$value = $cache->get('user_123', ['name' => 'Unknown']);
 ```
 
 ---
 
 ### ()set
 
-ذخیره یک آیتم در cache.
-
 ```php
 public function set(string $key, mixed $value, null|int|DateInterval $ttl = null): bool
 ```
 
-**پارامترها:**
-- `$key` (string): کلید cache
-- `$value` (mixed): مقدار برای cache کردن (هر نوع قابل serialize)
-- `$ttl` (int|DateInterval|null): مدت زمان زنده ماندن. null = استفاده از پیش‌فرض، 0 = برای همیشه
+- `$ttl`: مقدار `null` یعنی TTL پیش‌فرض؛ عدد مثبت یا `DateInterval` یعنی طول عمر؛ `0` یا عدد منفی آیتم را **حذف** می‌کند (طبق PSR-16)
 
-**برمی‌گرداند:** `true` در صورت موفقیت، `false` در صورت شکست
+**خروجی:** اگر همهٔ لایه‌ها آیتم را ذخیره کنند `true`
 
-**استثنا:**
-- `InvalidArgument` اگر کلید نامعتبر باشد
-
-**مثال:**
 ```php
 $cache->set('user_123', $user, 3600);
 $cache->set('config', $config, new DateInterval('P1D'));
-$cache->set('permanent', $data, 0);
 ```
 
 ---
 
 ### ()delete
 
-حذف یک آیتم از cache.
-
 ```php
 public function delete(string $key): bool
 ```
 
-**پارامترها:**
-- `$key` (string): کلید cache
-
-**برمی‌گرداند:** `true` در صورت موفقیت
-
-**استثنا:**
-- `InvalidArgument` اگر کلید نامعتبر باشد
-
-**مثال:**
-```php
-$cache->delete('user_123');
-```
+**خروجی:** اگر آیتم از همهٔ لایه‌ها حذف شده باشد `true` (حتی اگر از اول وجود نداشته)؛ `false` فقط در صورت خطا
 
 ---
 
 ### ()clear
 
-پاک کردن تمام آیتم‌ها از cache.
-
 ```php
 public function clear(): bool
 ```
 
-**برمی‌گرداند:** `true` در صورت موفقیت
-
-**مثال:**
-```php
-$cache->clear();
-```
+همهٔ لایه‌ها را پاک می‌کند. هر storage فقط رکوردهای خودش را حذف می‌کند (بر اساس prefix یا الگوی نام فایل)، نه دادهٔ دیگری را.
 
 ---
 
 ### ()has
 
-بررسی وجود یک آیتم در cache.
-
 ```php
 public function has(string $key): bool
 ```
 
-**پارامترها:**
-- `$key` (string): کلید cache
-
-**برمی‌گرداند:** `true` اگر وجود داشته باشد و منقضی نشده باشد
-
-**استثنا:**
-- `InvalidArgument` اگر کلید نامعتبر باشد
-
-**مثال:**
-```php
-if ($cache->has('user_123')) {
-    echo "کاربر cache شده است";
-}
-```
+**خروجی:** اگر رکورد تازه‌ای وجود داشته باشد `true` (حتی وقتی مقدار کش‌شده `null` است). مقدار deserialize نمی‌شود.
 
 ---
 
 ### ()getMultiple
 
-بازیابی چندین آیتم از cache.
-
 ```php
-public function getMultiple(iterable $keys, mixed $default = null): iterable
+public function getMultiple(iterable $keys, mixed $default = null): array
 ```
 
-**پارامترها:**
-- `$keys` (iterable): لیست کلیدهای cache
-- `$default` (mixed): مقدار پیش‌فرض برای کلیدهای موجود نیست
+**خروجی:** آرایهٔ key => value به ترتیب `$keys`
 
-**برمی‌گرداند:** آرایه associative از key => value
+**استثنا:** `InvalidArgument` اگر یکی از کلیدها نامعتبر یا غیررشته‌ای باشد
 
-**استثنا:**
-- `InvalidArgument` اگر keys قابل تکرار نباشد
+storageهایی که `BatchStorageInterface` را پیاده می‌کنند در هر لایه با یک درخواست خوانده می‌شوند، و از لایه‌های پایین‌تر فقط کلیدهایی پرسیده می‌شود که هنوز پیدا نشده‌اند.
 
-**مثال:**
 ```php
-$results = $cache->getMultiple(['key1', 'key2', 'key3'], null);
+$cache->getMultiple(['key1', 'key2', 'key3'], null);
 // ['key1' => 'value1', 'key2' => 'value2', 'key3' => null]
 ```
 
@@ -198,57 +159,25 @@ $results = $cache->getMultiple(['key1', 'key2', 'key3'], null);
 
 ### ()setMultiple
 
-ذخیره چندین آیتم در cache.
-
 ```php
 public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
 ```
 
-**پارامترها:**
-- `$values` (iterable): آرایه associative از key => value
-- `$ttl` (int|DateInterval|null): مدت زمان زنده ماندن
-
-**برمی‌گرداند:** `true` اگر همه موفق شوند
-
-**استثنا:**
-- `InvalidArgument` اگر values قابل تکرار نباشد
-
-**مثال:**
-```php
-$cache->setMultiple([
-    'key1' => 'value1',
-    'key2' => 'value2',
-], 3600);
-```
+همهٔ کلیدها پیش از نوشتن اعتبارسنجی می‌شوند. TTL کوچک‌تر یا مساوی صفر کلیدها را حذف می‌کند.
 
 ---
 
 ### ()deleteMultiple
 
-حذف چندین آیتم از cache.
-
 ```php
 public function deleteMultiple(iterable $keys): bool
-```
-
-**پارامترها:**
-- `$keys` (iterable): لیست کلیدهای cache
-
-**برمی‌گرداند:** `true` اگر همه موفق شوند
-
-**استثنا:**
-- `InvalidArgument` اگر keys قابل تکرار نباشد
-
-**مثال:**
-```php
-$cache->deleteMultiple(['key1', 'key2', 'key3']);
 ```
 
 ---
 
 ### ()getOrSetSWR
 
-دریافت یا تنظیم با پشتیبانی Stale-While-Revalidate.
+گرفتن یا محاسبهٔ مقدار با stale-while-revalidate، stale-if-error و جلوگیری از cache stampede.
 
 ```php
 public function getOrSetSWR(
@@ -262,57 +191,107 @@ public function getOrSetSWR(
 ```
 
 **پارامترها:**
-- `$key` (string): کلید cache
-- `$producer` (callable): تابع برای تولید مقدار تازه: `function(): mixed`
-- `$ttl` (int|DateInterval|null): TTL داده تازه
-- `$swrSeconds` (int): پنجره stale-while-revalidate به ثانیه
-- `$staleIfErrorSeconds` (int): پنجره stale-if-error به ثانیه
-- `$options` (array): آرایه گزینه‌ها
-  - `mode` (string): 'sync' یا 'defer' (پیش‌فرض: 'sync')
+- `$producer`: تابعی به شکل `function(): mixed` که مقدار تازه را تولید می‌کند
+- `$ttl`: مدت تازه بودن. `null` یعنی TTL پیش‌فرض (`0` = بدون انقضا). مقدار کوچک‌تر یا مساوی صفر یعنی محاسبه **بدون کش کردن**
+- `$swrSeconds`: تا چند ثانیه بعد از انقضا مقدار قدیمی سرو شود و همزمان تازه‌سازی انجام شود
+- `$staleIfErrorSeconds`: تا چند ثانیه بعد از انقضا، اگر producer خطا داد، مقدار قدیمی سرو شود
+- `$options['mode']`: `'sync'` (پیش‌فرض) یا `'defer'`
 
-**برمی‌گرداند:** مقدار cache شده یا تازه
+**استثناها:**
+- `InvalidArgument` برای کلید یا mode نامعتبر
+- خطای `$producer` وقتی مقدار قدیمی قابل‌استفاده‌ای وجود نداشته باشد
 
-**استثنا:**
-- `InvalidArgument` اگر کلید نامعتبر باشد
-- استثناهای `$producer` را مجدداً پرتاب می‌کند در صورت cache miss
+**رفتار:**
 
-**مثال:**
+| وضعیت رکورد | چه اتفاقی می‌افتد |
+|---|---|
+| تازه | فوراً برگردانده می‌شود |
+| منقضی، داخل `swrSeconds` | فقط یک پروسه رکورد را تازه می‌کند؛ پروسه‌هایی که قفل را نمی‌گیرند بدون انتظار مقدار قدیمی را می‌گیرند. در حالت `sync` پروسهٔ تازه‌کننده مقدار **جدید** را برمی‌گرداند؛ در حالت `defer` مقدار قدیمی برگردانده می‌شود و تازه‌سازی بعد از ارسال پاسخ انجام می‌شود (PHP-FPM/LiteSpeed، در غیر این صورت `sync`). اگر تازه‌سازی شکست بخورد مقدار قدیمی برگردانده می‌شود |
+| منقضی، فقط داخل `staleIfErrorSeconds` | دوباره محاسبه می‌شود؛ فقط اگر producer خطا بدهد مقدار قدیمی برگردانده می‌شود |
+| وجود ندارد (یا خیلی قدیمی است) | زیر قفل مخصوص همان کلید محاسبه می‌شود (حداکثر انتظار `lockTimeout`). بعد از گرفتن قفل دوباره کش بررسی می‌شود، پس درخواست‌های همزمان producer را فقط یک بار اجرا می‌کنند |
+
+نتیجهٔ `null` هم مثل بقیهٔ مقادیر کش می‌شود.
+
 ```php
 $data = $cache->getOrSetSWR(
     'expensive_data',
-    fn() => computeExpensiveData(),
-    300,     // تازه برای 5 دقیقه
-    60,      // کهنه برای 1 دقیقه
-    600,     // کهنه برای 10 دقیقه در صورت خطا
-    ['mode' => 'defer']
+    fn () => computeExpensiveData(),
+    ttl: 300,
+    swrSeconds: 60,
+    staleIfErrorSeconds: 600,
+    options: ['mode' => 'defer'],
 );
 ```
 
-**رفتار:**
-1. **Cache hit (تازه):** مقدار cache شده را فوراً برمی‌گرداند
-2. **Cache hit (کهنه، در SWR):** مقدار کهنه را برمی‌گرداند، refresh پس‌زمینه را فعال می‌کند
-3. **Cache miss:** قفل را به دست می‌آورد، producer را فراخوانی می‌کند، نتیجه را cache می‌کند
-4. **خطای Producer با داده کهنه:** کهنه را برمی‌گرداند اگر در پنجره staleIfError باشد
+---
+
+### ()remember
+
+```php
+public function remember(string $key, null|int|DateInterval $ttl, callable $producer): mixed
+```
+
+میان‌بر برای `getOrSetSWR($key, $producer, $ttl)` (بدون سرو مقدار قدیمی، با جلوگیری از stampede).
+
+---
+
+### ()forever
+
+```php
+public function forever(string $key, mixed $value): bool
+```
+
+ذخیرهٔ مقدار بدون انقضا.
+
+---
+
+### ()tags و ()invalidateTags
+
+```php
+public function tags(string|array $tags): TaggedCache
+public function invalidateTags(string|array $tags): bool
+```
+
+`tags()` یک نمای [TaggedCache](#taggedcache) برمی‌گرداند. `invalidateTags()` همهٔ رکوردهایی را که با هر یک از این tagها نوشته شده‌اند غیرقابل‌دسترس می‌کند. این رکوردها حذف نمی‌شوند؛ با TTL خودشان یا `prune()` از بین می‌روند.
+
+```php
+$cache->tags(['users', 'team-7'])->set('user-42', $user, 3600);
+$cache->invalidateTags('team-7');
+```
 
 ---
 
 ### ()prune
 
-حذف آیتم‌های منقضی شده از storage backends.
-
 ```php
 public function prune(): int
 ```
 
-**برمی‌گرداند:** تعداد آیتم‌های حذف شده
+**خروجی:** تعداد رکوردهای حذف‌شده. `FileStorage` و `PdoStorage` رکوردهای منقضی را حذف می‌کنند (FileStorage فایل‌هایی با قالب ناشناخته و فایل‌های موقت رهاشده را هم پاک می‌کند)؛ APCu و Redis خودشان رکوردها را منقضی می‌کنند.
 
-**توجه:** فقط با backend هایی که از pruning پشتیبانی می‌کنند کار می‌کند (PdoStorage). File/APCu/Redis انقضا را به صورت خودکار مدیریت می‌کنند.
+---
 
-**مثال:**
+### ()getStats و ()resetStats
+
 ```php
-$pruned = $cache->prune();
-echo "تعداد {$pruned} آیتم منقضی شده حذف شد";
+public function getStats(): array
+public function resetStats(): void
 ```
+
+شمارنده‌های همین نمونه:
+
+```php
+[
+    'hits' => 120, 'misses' => 8, 'stale_hits' => 3, 'stale_if_error' => 1,
+    'writes' => 10, 'deletes' => 2, 'errors' => 0, 'hit_ratio' => 0.9426,
+]
+```
+
+---
+
+## TaggedCache
+
+نمای PSR-16 که `MultiTierCache::tags()` برمی‌گرداند. متدهای `get`، `set`، `delete`، `has`، `getMultiple`، `setMultiple`، `deleteMultiple`، `getOrSetSWR`، `remember` و `forever` را دارد. `clear()` روی این نما tagهای آن را باطل می‌کند. رکوردها باید با همان مجموعه tagی خوانده شوند که با آن نوشته شده‌اند (ترتیب مهم نیست). طول کلید حداکثر ۲۱۷ بایت است.
 
 ---
 
@@ -320,183 +299,174 @@ echo "تعداد {$pruned} آیتم منقضی شده حذف شد";
 
 ### StorageInterface
 
-تمام storage backend ها باید این interface را پیاده‌سازی کنند.
-
 ```php
 interface StorageInterface
 {
-    public function get(string $key): ?string;
-    public function set(string $key, string $payload, int $ttl): bool;
-    public function delete(string $key): bool;
+    public function get(string $key): ?string;          // null اگر وجود نداشته باشد یا منقضی شده باشد
+    public function set(string $key, string $payload, int $ttl): bool; // $ttl = 0 یعنی بدون انقضا
+    public function delete(string $key): bool;          // برای کلید ناموجود هم true
     public function has(string $key): bool;
-    public function clear(): bool;
-    public function prune(): int;
+    public function clear(): bool;                      // فقط رکوردهای همین storage
+    public function prune(): int;                       // تعداد رکوردهای حذف‌شده
 }
 ```
+
+### BatchStorageInterface
+
+اختیاری؛ همهٔ storageهای داخلی آن را پیاده کرده‌اند:
+
+```php
+interface BatchStorageInterface extends StorageInterface
+{
+    public function getMany(array $keys): array;              // payloadهای پیداشده بر اساس کلید
+    public function setMany(array $payloads, int $ttl): bool;
+    public function deleteMany(array $keys): bool;
+}
+```
+
+همهٔ storageهای داخلی `Psr\Log\LoggerAwareInterface` را پیاده می‌کنند و خطاها را به‌جای `error_log()` از طریق PSR-3 گزارش می‌دهند.
 
 ---
 
 ### FileStorage
 
-ذخیره‌سازی cache مبتنی بر فایل با directory sharding.
-
-#### سازنده
-
 ```php
 public function __construct(
     string $path,
     string $ext = '.cache',
-    int $shards = 2
+    int $shards = 2,
+    int $fileMode = 0640,
+    int $dirMode = 0770,
+    ?ClockInterface $clock = null,
+    ?LoggerInterface $logger = null
 )
 ```
 
-**پارامترها:**
-- `$path` (string): مسیر دایرکتوری cache
-- `$ext` (string): پسوند فایل (پیش‌فرض: '.cache')
-- `$shards` (int): سطح sharding از 0 تا 3 (پیش‌فرض: 2)
+- `$path`: دایرکتوری کش (اگر نباشد ساخته می‌شود). نباید خالی یا `/` باشد
+- `$ext`: پسوند فایل؛ فقط حروف، اعداد و `.` `_` `-`
+- `$shards`: تعداد سطح‌های زیردایرکتوری (۰ تا ۳)
+- `$fileMode` و `$dirMode`: مجوزهای دقیق (umask اعمال نمی‌شود)
 
-**استثنا:**
-- `\RuntimeException` اگر دایرکتوری ایجاد نشود یا قابل نوشتن نباشد
+**استثناها:** `\InvalidArgumentException` برای مسیر یا پسوند نامعتبر؛ `\RuntimeException` اگر دایرکتوری ساخته نشود یا قابل نوشتن نباشد
 
-**مثال:**
-```php
-$storage = new FileStorage('/var/cache/app', '.cache', 2);
-```
-
-#### متدها
-
-تمام متدهای `StorageInterface`.
-
-**یادداشت‌ها:**
-- از نوشتن اتمی استفاده می‌کند (فایل موقت + rename)
-- از flock() برای قفل خواندن استفاده می‌کند
-- از 0 تا 3 سطح directory sharding پشتیبانی می‌کند
-- `prune()` عدد 0 برمی‌گرداند (انقضا توسط MultiTierCache مدیریت می‌شود)
+**نکات:**
+- نام فایل، هش xxh128 کلید است؛ با ۲ shard ساختار `path/a1/b2/<hash>.cache` است
+- هر فایل با `ECF1` و زمان انقضا شروع می‌شود: `get()` فایل منقضی را نادیده می‌گیرد (و حذف می‌کند) و `prune()` آن را پاک می‌کند
+- نوشتن اتمیک: فایل موقت انحصاری (`fopen('x')` که هرگز symlink را دنبال نمی‌کند) و سپس `rename()`
+- دایرکتوری‌ها فقط هنگام نوشتن ساخته می‌شوند
+- `clear()` فقط فایل‌هایی را حذف می‌کند که با الگوی نام همین storage در دایرکتوری‌های shard مطابقت دارند و هرگز symlink را دنبال نمی‌کند
 
 ---
 
 ### ApcuStorage
 
-ذخیره‌سازی cache حافظه APCu.
-
-#### سازنده
-
 ```php
-public function __construct(string $prefix = 'ec:')
+public function __construct(string $prefix = 'ec:', int $maxTtl = 0, ?LoggerInterface $logger = null)
+public static function isAvailable(): bool
 ```
 
-**پارامترها:**
-- `$prefix` (string): پیشوند کلید برای namespace کردن (پیش‌فرض: 'ec:')
+- `$prefix`: اجباری و غیرخالی (`clear()` هر کلیدی با این prefix را حذف می‌کند)
+- `$maxTtl`: سقف TTL رکوردهای این لایه (۰ = بدون سقف). APCu فقط مخصوص یک سرور است؛ سقف کوتاه باعث می‌شود تغییرات سرورهای دیگر سریع دیده شوند
 
-**استثنا:**
-- `\RuntimeException` اگر افزونه APCu در دسترس نباشد یا فعال نباشد
-
-**مثال:**
-```php
-$storage = new ApcuStorage('myapp:');
-```
-
-#### متدها
-
-تمام متدهای `StorageInterface`.
-
-**یادداشت‌ها:**
-- `clear()` فقط کلیدهای با prefix پیکربندی شده را حذف می‌کند
-- بسیار سریع (در حافظه)
-- بین worker های PHP-FPM مشترک است
-- `prune()` عدد 0 برمی‌گرداند (APCu انقضا را مدیریت می‌کند)
+**استثناها:** `\RuntimeException` اگر APCu نصب یا فعال نباشد (در CLI به `apc.enable_cli=1` نیاز است)؛ `\InvalidArgumentException` برای prefix خالی
 
 ---
 
 ### RedisStorage
 
-ذخیره‌سازی cache Redis با پشتیبانی از phpredis و predis.
-
-#### سازنده
-
 ```php
-public function __construct($redisClient, string $prefix = 'ec:')
+public function __construct(object $redisClient, string $prefix = 'ec:', ?LoggerInterface $logger = null)
 ```
 
-**پارامترها:**
-- `$redisClient` (Redis|Predis\ClientInterface): نمونه client Redis
-- `$prefix` (string): پیشوند کلید (پیش‌فرض: 'ec:')
+- `$redisClient`: نمونهٔ `\Redis` (phpredis) یا `\Predis\ClientInterface`
+- `$prefix`: اجباری و غیرخالی
 
-**استثنا:**
-- `\InvalidArgumentException` اگر client نوع نامعتبری داشته باشد
+**استثنا:** `\InvalidArgumentException` برای کلاینت پشتیبانی‌نشده یا prefix خالی
 
-**مثال:**
-```php
-// phpredis
-$redis = new Redis();
-$redis->connect('127.0.0.1', 6379);
-$storage = new RedisStorage($redis, 'app:');
-
-// predis
-$redis = new Predis\Client('tcp://127.0.0.1:6379');
-$storage = new RedisStorage($redis, 'app:');
-```
-
-#### متدها
-
-تمام متدهای `StorageInterface`.
-
-**یادداشت‌ها:**
-- از SETEX برای پشتیبانی TTL استفاده می‌کند
-- `clear()` از SCAN برای حذف فقط کلیدهای با prefix استفاده می‌کند
-- `prune()` عدد 0 برمی‌گرداند (Redis انقضا را مدیریت می‌کند)
+**نکات:**
+- `SETEX` برای TTL، `MGET` برای خواندن دسته‌ای و pipeline برای نوشتن دسته‌ای
+- `clear()` از `SCAN` غیرمسدودکننده با prefix escape‌شده استفاده می‌کند (برای Predis هم) و prefix سطح کلاینت (`Redis::OPT_PREFIX` و گزینهٔ `prefix` در Predis) را درست مدیریت می‌کند
+- `prune()` صفر برمی‌گرداند (Redis خودش کلیدها را منقضی می‌کند)
 
 ---
 
 ### PdoStorage
 
-ذخیره‌سازی cache بانک اطلاعاتی PDO.
-
-#### سازنده
-
 ```php
-public function __construct(PDO $pdo, string $table = 'easycache')
-```
-
-**پارامترها:**
-- `$pdo` (PDO): نمونه PDO
-- `$table` (string): نام جدول (پیش‌فرض: 'easycache')
-
-**مثال:**
-```php
-$pdo = new PDO('mysql:host=localhost;dbname=cache', 'user', 'pass');
-$storage = new PdoStorage($pdo, 'cache_items');
-```
-
-#### ()ensureTable
-
-ایجاد جدول cache اگر وجود نداشته باشد.
-
-```php
+public function __construct(
+    PDO $pdo,
+    string $table = 'easycache',
+    ?ClockInterface $clock = null,
+    ?LoggerInterface $logger = null
+)
 public function ensureTable(): void
+public function upgradeSchema(): void
 ```
 
-**استثنا:**
-- `\RuntimeException` اگر ایجاد جدول شکست بخورد
+- `$table`: به شکل `[A-Za-z_][A-Za-z0-9_]*` یا `schema.table`؛ هر چیز دیگری `\InvalidArgumentException` می‌دهد
+- تنظیمات اتصال (مثل error mode) تغییر نمی‌کند؛ هم حالت exception و هم حالت silent پشتیبانی می‌شوند
+- payload به‌صورت باینری (`PDO::PARAM_LOB`) bind می‌شود
+- کلیدهای بلندتر از ۶۴ بایت به شکل `':' . sha256` ذخیره می‌شوند تا در ستون کلید جا شوند
+- `ensureTable()` در صورت نیاز جدول را می‌سازد:
 
-**مثال:**
+| درایور | کلید | Payload | انقضا |
+|---|---|---|---|
+| SQLite | `TEXT` | `BLOB` | `INTEGER` |
+| MySQL/MariaDB | `VARBINARY(64)` (حساس به حروف بزرگ و کوچک) | `LONGBLOB` | `BIGINT` |
+| PostgreSQL | `VARCHAR(64)` | `BYTEA` | `BIGINT` |
+
+- `upgradeSchema()` جدول‌های MySQL ساخته‌شده با EasyCache قبل از 3.1 را (`BLOB` و کلید غیرحساس به حروف) به‌روز می‌کند
+- `prune()` ردیف‌های منقضی را حذف و تعدادشان را برمی‌گرداند
+
+---
+
+## قفل‌ها (Locks)
+
+### LockInterface و LockProviderInterface
+
 ```php
-$storage->ensureTable();
+interface LockInterface
+{
+    public function acquire(bool $blocking = true, ?float $timeout = null): bool;
+    public function release(): void;
+}
+
+interface LockProviderInterface
+{
+    public function create(string $key): LockInterface;
+}
 ```
 
-**طرح جدول:**
-- `k` (VARCHAR(64) PRIMARY KEY): کلید cache
-- `payload` (BLOB): داده serialize و فشرده شده
-- `expires_at` (BIGINT): timestamp انقضا
+### FileLockProvider
 
-#### متدها
+```php
+public function __construct(?string $directory = null, int $mode = 0770)
+```
 
-تمام متدهای `StorageInterface`.
+قفل‌های مبتنی بر `flock()` (فقط در یک ماشین). بدون دایرکتوری، یک دایرکتوری مخصوص کاربر در temp سیستم با مجوز `0700` ساخته می‌شود و فقط وقتی استفاده می‌شود که مالکش کاربر جاری باشد و دیگران نتوانند در آن بنویسند. اگر دایرکتوری قابل استفاده نباشد قفل گرفته نمی‌شود و مقدار بدون قفل محاسبه (و همچنان کش) می‌شود.
 
-**یادداشت‌ها:**
-- `prune()` سطرهای منقضی شده را حذف می‌کند و تعداد را برمی‌گرداند
-- از MySQL، PostgreSQL، SQLite پشتیبانی می‌کند
-- از UPSERT برای عملیات set اتمی استفاده می‌کند
+### RedisLockProvider
+
+```php
+public function __construct(object $redis, string $prefix = 'ec:lock:', int $ttlMs = 30000)
+```
+
+قفل توزیع‌شده برای چند سرور (`SET key token NX PX ttl` و آزادسازی با اسکریپت Lua از نوع compare-and-delete). TTL در برابر پروسه‌هایی که crash می‌کنند محافظت می‌کند؛ `acquire()` مسدودکننده حداکثر به اندازهٔ TTL منتظر می‌ماند.
+
+### NullLockProvider
+
+قفل را غیرفعال می‌کند (هر قفلی فوراً گرفته می‌شود).
+
+### Util\Lock
+
+```php
+public function __construct(string $path, bool $removeOnRelease = true)
+public function acquire(bool $blocking = true, ?float $timeout = null): bool
+public function release(): void
+public function isAcquired(): bool
+```
+
+قفل فایلی که `FileLockProvider` استفاده می‌کند. فایل قفلی را که symlink باشد رد می‌کند، timeout دارد و فایل قفل را هنگام آزادسازی حذف می‌کند (بدون race: بعد از قفل کردن بررسی می‌کند فایل قفل‌شده هنوز همان فایل موجود در مسیر باشد).
 
 ---
 
@@ -508,44 +478,34 @@ $storage->ensureTable();
 interface SerializerInterface
 {
     public function serialize(mixed $value): string;
-    public function deserialize(string $payload): mixed;
-    public function name(): string;
+    public function deserialize(string $payload): mixed; // برای ورودی نامعتبر باید exception بدهد
+    public function name(): string;                      // ۱ تا ۲۵۵ بایت، همراه هر رکورد ذخیره می‌شود
 }
 ```
 
----
-
 ### NativeSerializer
 
-سریال‌سازی بومی PHP.
-
 ```php
-$serializer = new NativeSerializer();
+public function __construct(bool|array $allowedClasses = true, int $maxDepth = 0)
 ```
 
-**ویژگی‌ها:**
-- از اشیاء و انواع پیچیده پشتیبانی می‌کند
-- نام: 'php'
-- از `serialize()` و `unserialize()` استفاده می‌کند
+- `$allowedClasses`: `true` (هر کلاسی)، `false` (بدون شیء) یا فهرستی از نام کلاس‌ها. بقیهٔ کلاس‌ها به `__PHP_Incomplete_Class` تبدیل می‌شوند
+- `$maxDepth`: حداکثر عمق تودرتو بودن (۰ = پیش‌فرض PHP)
+- برای payload نامعتبر `\UnexpectedValueException` می‌دهد (مقدار `false` ذخیره‌شده همچنان `false` برگردانده می‌شود)
+- نام: `php`
 
----
+> unserialize کردن داده‌ای که مهاجم کنترلش می‌کند می‌تواند به اجرای کد برسد. `$allowedClasses` را محدود کنید و/یا از کلید امضا استفاده کنید.
 
 ### JsonSerializer
 
-سریال‌سازی JSON.
-
 ```php
-$serializer = new JsonSerializer();
+public function __construct(int $depth = 512)
 ```
 
-**ویژگی‌ها:**
-- قابل حمل بین زبان‌ها
-- نام: 'json'
-- از flag `JSON_THROW_ON_ERROR` استفاده می‌کند
-- کاراکترهای Unicode را حفظ می‌کند
-
-**استثنا:**
-- `\JsonException` در صورت داده نامعتبر
+- هرگز شیء نمی‌سازد: اشیاء به‌صورت آرایهٔ انجمنی برمی‌گردند
+- نوع float حفظ می‌شود (`1.0` همان float می‌ماند)
+- برای دادهٔ نامعتبر `\JsonException` می‌دهد
+- نام: `json`
 
 ---
 
@@ -558,75 +518,45 @@ interface CompressorInterface
 {
     public function compress(string $data): string;
     public function decompress(string $data): string;
-    public function name(): string;
+    public function name(): string; // همراه هر رکورد ذخیره می‌شود؛ "none" یعنی فشرده‌نشده
 }
 ```
 
----
+نام compressor همراه هر رکورد ذخیره می‌شود. رکوردهای فشرده با `gzip` یا `zstd` بعد از تعویض compressor هم قابل خواندن می‌مانند؛ رکوردهایی که با compressor سفارشی نوشته شده‌اند برای خوانده شدن به همان compressor نیاز دارند (وگرنه miss حساب می‌شوند).
 
 ### NullCompressor
 
-بدون فشرده‌سازی.
-
-```php
-$compressor = new NullCompressor();
-```
-
-**ویژگی‌ها:**
-- عبوری (بدون فشرده‌سازی)
-- نام: 'none'
-
----
+بدون فشرده‌سازی. نام: `none`.
 
 ### GzipCompressor
 
-فشرده‌سازی Gzip.
-
 ```php
-public function __construct(int $level = 3)
+public function __construct(int $level = 3, int $maxDecompressedSize = 64 * 1024 * 1024)
 ```
 
-**پارامترها:**
-- `$level` (int): سطح فشرده‌سازی 0-9 (پیش‌فرض: 3)
-
-**مثال:**
-```php
-$compressor = new GzipCompressor(5);
-```
-
-**ویژگی‌ها:**
-- نام: 'gzip'
-- نیاز به ext-zlib دارد
-- سطح 0 = بدون فشرده‌سازی، 9 = حداکثر
-
-**استثنا:**
-- `\RuntimeException` اگر zlib در دسترس نباشد یا فشرده‌سازی شکست بخورد
-
----
+- `$level`: ۰ تا ۹ (خارج از بازه محدود می‌شود)
+- `$maxDecompressedSize`: بیش از این تعداد بایت را از حالت فشرده خارج نمی‌کند (۰ = نامحدود)
+- به ext-zlib نیاز دارد. نام: `gzip`
 
 ### ZstdCompressor
 
-فشرده‌سازی Zstandard.
-
 ```php
-public function __construct(int $level = 3)
+public function __construct(int $level = 3, int $maxDecompressedSize = 64 * 1024 * 1024)
 ```
 
-**پارامترها:**
-- `$level` (int): سطح فشرده‌سازی (پیش‌فرض: 3)
+- `$level`: ۱ تا ۲۲ (خارج از بازه محدود می‌شود)
+- به ext-zstd نیاز دارد. نام: `zstd`
 
-**مثال:**
-```php
-$compressor = new ZstdCompressor(3);
-```
+---
 
-**ویژگی‌ها:**
-- نام: 'zstd'
-- نیاز به ext-zstd دارد
-- سریع‌تر از Gzip
+## ساعت‌ها (Clocks)
 
-**استثنا:**
-- `\RuntimeException` اگر zstd در دسترس نباشد یا فشرده‌سازی شکست بخورد
+هر دو `Psr\Clock\ClockInterface` را پیاده می‌کنند.
+
+- `SystemClock`: زمان سیستم (پیش‌فرض)
+- `FrozenClock`: برای تست: `new FrozenClock()`، `FrozenClock::at($timestamp)`، `->advance(int $seconds)` و `->set(DateTimeImmutable $now)`
+
+یک clock مشترک را به `MultiTierCache` و `FileStorage`/`PdoStorage` بدهید تا انقضا را در تست‌ها بدون `sleep()` کنترل کنید.
 
 ---
 
@@ -634,87 +564,22 @@ $compressor = new ZstdCompressor(3);
 
 ### KeyValidator
 
-اعتبارسنجی کلیدهای cache طبق PSR-16.
-
-#### ()assert
-
 ```php
 public static function assert(string $key): void
+public static function normalize(mixed $key): string // برای کلیدهای داخل iterable؛ عدد صحیح هم پذیرفته می‌شود
 ```
-
-**پارامترها:**
-- `$key` (string): کلید برای اعتبارسنجی
-
-**استثنا:**
-- `InvalidArgument` اگر کلید نامعتبر باشد
 
 **قوانین:**
-- حداکثر 64 کاراکتر
-- فقط: `A-Za-z0-9_.`
-- ممنوع: `{}()/\@:`
-
-**مثال:**
-```php
-KeyValidator::assert('user_123');     // موفق
-KeyValidator::assert('user:123');     // استثنا
-KeyValidator::assert('user/profile'); // استثنا
-```
-
----
-
-### Lock
-
-مکانیزم قفل مبتنی بر فایل.
-
-#### سازنده
+- ۱ تا ۲۵۵ بایت (`KeyValidator::MAX_LENGTH`)
+- فقط ASCII قابل چاپ (`!` تا `~`): بدون فاصله، کاراکتر کنترلی یا بایت غیر ASCII
+- بدون کاراکترهای رزروشدهٔ `{}()/\@:` (`KeyValidator::RESERVED_CHARACTERS`)
 
 ```php
-public function __construct(string $path)
+KeyValidator::assert('user_123');          // معتبر
+KeyValidator::assert('user-3f2a-77b2');    // معتبر
+KeyValidator::assert('user:123');          // exception
+KeyValidator::assert("user\n");            // exception
 ```
-
-**پارامترها:**
-- `$path` (string): مسیر فایل قفل
-
----
-
-#### ()acquire
-
-```php
-public function acquire(bool $blocking = true): bool
-```
-
-**پارامترها:**
-- `$blocking` (bool): منتظر قفل بماند (true) یا فوراً شکست بخورد (false)
-
-**برمی‌گرداند:** `true` اگر قفل به دست آمد
-
-**مثال:**
-```php
-$lock = new Lock('/tmp/my.lock');
-
-// حالت مسدود کننده
-if ($lock->acquire(true)) {
-    // کار را انجام دهید
-    $lock->release();
-}
-
-// حالت غیر مسدود کننده
-if ($lock->acquire(false)) {
-    // کار را انجام دهید
-} else {
-    echo "نتوانست قفل را به دست آورد";
-}
-```
-
----
-
-#### ()release
-
-```php
-public function release(): void
-```
-
-**توجه:** به صورت خودکار در destructor فراخوانی می‌شود.
 
 ---
 
@@ -722,104 +587,80 @@ public function release(): void
 
 ### InvalidArgument
 
-برای کلیدهای cache یا آرگومان‌های نامعتبر پرتاب می‌شود.
-
 ```php
-class InvalidArgument extends \InvalidArgumentException 
+final class InvalidArgument extends \InvalidArgumentException
     implements Psr\SimpleCache\InvalidArgumentException
 ```
 
-**مثال:**
-```php
-try {
-    $cache->set('invalid:key', 'value');
-} catch (InvalidArgument $e) {
-    echo "کلید نامعتبر: " . $e->getMessage();
-}
-```
+برای کلید، tag یا mode نامعتبر SWR پرتاب می‌شود.
 
 ---
 
-## یکپارچه‌سازی Laravel
+## یکپارچگی با Laravel
 
-### Facade
+### Container و Facade
 
 ```php
-use EasyCache;
-
-EasyCache::set('key', 'value', 3600);
-$value = EasyCache::get('key');
+app('easycache');                                    // singleton از MultiTierCache
+app(\Iprodev\EasyCache\Cache\MultiTierCache::class); // همان نمونه
+EasyCache::remember('stats', 300, fn () => $this->computeStats());
 ```
 
-تمام متدهای `MultiTierCache` در دسترس هستند.
+Facade همهٔ متدهای عمومی `MultiTierCache` را در اختیار می‌گذارد.
+
+### دستورات Artisan
+
+```bash
+php artisan easycache:prune   # حذف رکوردهای منقضی
+php artisan easycache:clear   # حذف همهٔ رکوردها
+```
 
 ### پیکربندی
 
-منتشر شده در `config/easycache.php`:
+دستور `php artisan vendor:publish --tag=easycache-config` فایل `config/easycache.php` را منتشر می‌کند. گزینه‌های اصلی (همه از طریق متغیرهای محیطی `EASYCACHE_*` هم قابل تنظیم‌اند؛ README را ببینید):
 
 ```php
 return [
-    'drivers' => ['apcu', 'redis', 'file'],
+    'drivers' => ['file'],              // apcu، redis، file، pdo (سریع‌ترین اول)
+    'skip_unavailable_drivers' => true, // درایوری که راه‌اندازی نشود لاگ و رد می‌شود
     'default_ttl' => 600,
-    'lock_path' => storage_path('framework/cache/easycache-locks'),
-    
-    'serializer' => [
-        'driver' => 'php', // php|json
-    ],
-    
-    'compressor' => [
-        'driver' => 'gzip', // none|gzip|zstd
-        'level' => 3,
-    ],
-    
-    // گزینه‌های خاص backend
+    'sign' => true,                     // امضای رکوردها...
+    'signing_key' => null,              // ...با این کلید یا کلیدی مشتق از APP_KEY
+    'lock' => ['driver' => 'file', 'path' => storage_path('framework/cache/easycache-locks'), 'timeout' => 30],
+    'apcu' => ['prefix' => 'ec:', 'max_ttl' => 60],
+    'redis' => ['client' => 'phpredis', 'host' => '127.0.0.1', 'port' => 6379, 'prefix' => 'ec:'],
+    'file' => ['path' => storage_path('framework/cache/easycache'), 'ext' => '.cache', 'shards' => 2],
+    'pdo' => ['dsn' => '', 'table' => 'easycache', 'auto_create' => true], // '' = SQLite در storage
+    'serializer' => ['driver' => 'php', 'allowed_classes' => true],
+    'compressor' => ['driver' => 'none', 'level' => 3],
 ];
 ```
 
-### Service Provider
-
-به صورت خودکار کشف می‌شود. ثبت می‌کند:
-- Facade `EasyCache`
-- Singleton `easycache` در container
-
 ---
 
-## مرجع انواع
+## قالب رکورد
 
-### انواع رایج
-
-```php
-// انواع TTL
-int           // ثانیه
-DateInterval  // مثلاً new DateInterval('PT1H')
-null          // استفاده از TTL پیش‌فرض
-
-// انواع مقدار پشتیبانی شده
-string
-int
-float
-bool
-null
-array
-object (با NativeSerializer)
 ```
+"EC03" | flags (۱ بایت، بیت ۰ = امضاشده) | expires (uint64 BE، ۰ = بدون انقضا)
+| swr (uint32 BE) | sei (uint32 BE)
+| طول نام serializer (۱) + نام | طول نام compressor (۱) + نام
+| [HMAC-SHA256 روی هدر + بدنه (۳۲ بایت)، اگر امضا شده باشد]
+| body = compress(serialize(value))
+```
+
+هدر با `unpack()` خوانده می‌شود؛ فقط بدنه و فقط بعد از تأیید امضا (در صورت وجود) به serializer داده می‌شود. رکوردهای با هر قالب دیگری miss حساب می‌شوند.
 
 ---
 
 ## مدیریت خطا
 
-تمام عملیات به صورت داخلی در try-catch قرار دارند. شکست‌ها اگر logger فراهم شده باشد ثبت می‌شوند و به جای پرتاب کردن false/null برمی‌گردانند.
+خطاهای storage، serialization و فشرده‌سازی لاگ می‌شوند (PSR-3) و در `getStats()['errors']` شمرده می‌شوند؛ در این حالت عملیات به‌جای پرتاب exception مقدار `false`، مقدار پیش‌فرض یا miss برمی‌گرداند.
 
 **استثناهایی که پرتاب می‌شوند:**
-- `InvalidArgument`: کلیدها یا پارامترهای نامعتبر
-- `\RuntimeException`: خطاهای ساخت (افزونه‌های گمشده، مسیرهای نامعتبر)
-- `\JsonException`: خطاهای سریال‌سازی JSON (JsonSerializer)
-
-**استثناهایی که پرتاب نمی‌شوند (به جای آن ثبت می‌شوند):**
-- شکست‌های storage (خطاهای خواندن/نوشتن)
-- خطاهای فشرده‌سازی/رفع فشرده‌سازی
-- شکست‌های به دست آوردن قفل
+- `InvalidArgument`: کلید، tag یا گزینهٔ نامعتبر
+- `\InvalidArgumentException` / `\RuntimeException`: خطاهای ساخت شیء (افزونهٔ ناموجود، مسیر نامعتبر، کلید امضای کوتاه و...)
+- خطاهای producer شما در `getOrSetSWR()`/`remember()` وقتی مقدار قدیمی قابل سرو وجود نداشته باشد
 
 ---
 
-برای مثال‌های بیشتر، [EXAMPLES.md](EXAMPLES.md) را ببینید.
+برای مثال‌های بیشتر [EXAMPLES_FA.md](EXAMPLES_FA.md) را ببینید.

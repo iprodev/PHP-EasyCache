@@ -245,10 +245,6 @@ class MultiTierCache implements CacheInterface
      */
     public function setMultiple(iterable $values, null|int|DateInterval $ttl = null): bool
     {
-        if (!is_iterable($values)) {
-            throw new InvalidArgument('Values must be iterable');
-        }
-
         $items = [];
         foreach ($values as $key => $value) {
             $items[KeyValidator::normalize($key)] = $value;
@@ -1061,10 +1057,6 @@ class MultiTierCache implements CacheInterface
      */
     private function normalizeKeys(iterable $keys): array
     {
-        if (!is_iterable($keys)) {
-            throw new InvalidArgument('Keys must be iterable');
-        }
-
         $list = [];
         foreach ($keys as $key) {
             $list[] = KeyValidator::normalize($key);

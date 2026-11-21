@@ -118,13 +118,17 @@ final class ApcuStorage implements BatchStorageInterface, LoggerAwareInterface
             $values[$this->k((string) $key)] = $payload;
         }
 
+        // With an array, apcu_store() returns the keys that could not be stored.
         $failed = apcu_store($values, null, $this->ttl($ttl));
-        if (is_array($failed) && $failed !== []) {
-            $this->logWarning('EasyCache: APCu store failed for {count} keys', ['count' => count($failed)]);
-            return false;
+        if ($failed === []) {
+            return true;
         }
 
-        return $failed !== false;
+        $this->logWarning('EasyCache: APCu store failed for {count} keys', [
+            'count' => is_array($failed) ? count($failed) : count($values),
+        ]);
+
+        return false;
     }
 
     public function deleteMany(array $keys): bool

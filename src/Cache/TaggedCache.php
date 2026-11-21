@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Iprodev\EasyCache\Cache;
 
 use DateInterval;
-use Iprodev\EasyCache\Exceptions\InvalidArgument;
 use Iprodev\EasyCache\Util\KeyValidator;
 use Psr\SimpleCache\CacheInterface;
 
@@ -150,10 +149,6 @@ final class TaggedCache implements CacheInterface
      */
     private function keyMap(iterable $keys): array
     {
-        if (!is_iterable($keys)) {
-            throw new InvalidArgument('Keys must be iterable');
-        }
-
         $map = [];
         foreach ($keys as $key) {
             $key = KeyValidator::normalize($key);

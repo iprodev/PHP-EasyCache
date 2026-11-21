@@ -35,10 +35,8 @@
     "psr/simple-cache-implementation": "2.0 || 3.0"
   },
   "require-dev": {
-    "larastan/larastan": "^2.9",
-    "orchestra/testbench": "^8.0 || ^9.0",
-    "phpstan/phpstan": "^1.12",
-    "phpunit/phpunit": "^10.5",
+    "phpstan/phpstan": "^2.1",
+    "phpunit/phpunit": "^10.5 || ^11.5",
     "predis/predis": "^2.0",
     "squizlabs/php_codesniffer": "^3.9"
   },
@@ -84,10 +82,12 @@
       "@stan",
       "@test"
     ],
-    "docs": "echo 'See API.md, README.md, and EXAMPLES.md for documentation'"
+    "docs": "echo 'See API.md, README.md, and EXAMPLES.md for documentation'",
+    "test:laravel": "phpunit --colors=always --testsuite laravel",
+    "stan:laravel": "phpstan analyse --memory-limit=1G -c phpstan.laravel.neon.dist"
   },
   "scripts-descriptions": {
-    "test": "Run all PHPUnit tests",
+    "test": "Run the test suite (unit + integration, without Laravel)",
     "test:coverage": "Run tests with HTML coverage report",
     "test:filter": "Run specific test by name (e.g., composer test:filter testSetAndGet)",
     "stan": "Run PHPStan static analysis",
@@ -95,7 +95,9 @@
     "cs": "Check code style (PSR-12)",
     "cs:fix": "Fix code style issues automatically",
     "qa": "Run all quality assurance checks (cs, stan, test)",
-    "docs": "Show documentation files"
+    "docs": "Show documentation files",
+    "test:laravel": "Run the Laravel integration tests (requires orchestra/testbench)",
+    "stan:laravel": "Run PHPStan on the Laravel integration (requires larastan/larastan)"
   },
   "bin": [
     "bin/easycache-prune"
