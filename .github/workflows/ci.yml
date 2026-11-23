@@ -24,7 +24,7 @@ jobs:
           extensions: apcu, redis, zstd
           coverage: none
 
-      - uses: ramsey/composer-install@v3
+      - uses: ramsey/composer-install@v4
 
       - name: PHP_CodeSniffer (PSR-12)
         run: composer cs
@@ -92,7 +92,7 @@ jobs:
           ini-values: apc.enabled=1, apc.enable_cli=1
           coverage: ${{ matrix.php == '8.4' && 'pcov' || 'none' }}
 
-      - uses: ramsey/composer-install@v3
+      - uses: ramsey/composer-install@v4
 
       - name: Run tests
         if: matrix.php != '8.4'
@@ -130,7 +130,7 @@ jobs:
       - name: Add Laravel test tooling
         run: composer require --dev --no-update "orchestra/testbench:^10.0 || ^11.0" "larastan/larastan:^3.0"
 
-      - uses: ramsey/composer-install@v3
+      - uses: ramsey/composer-install@v4
 
       - name: PHPStan (Laravel integration, Larastan)
         run: composer stan:laravel
@@ -149,7 +149,7 @@ jobs:
           php-version: '8.3'
           coverage: none
 
-      - uses: ramsey/composer-install@v3
+      - uses: ramsey/composer-install@v4
         with:
           dependency-versions: lowest
 
